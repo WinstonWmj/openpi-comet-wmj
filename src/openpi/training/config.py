@@ -760,9 +760,7 @@ _CONFIGS = [
                 fine_grained_level=0,  # 0, 1, 2
             ),
         ),
-        weight_loader=weight_loaders.CheckpointWeightLoader(
-            "sunshk/openpi_comet/pi05-b1kpt50-cs32"
-        ),  # hf download in advance
+        weight_loader=weight_loaders.CheckpointWeightLoader("/mnt/public/chenjiawei/projects/models/openpi_comet/pi05-b1kpt12-cs32/params"),
         num_train_steps=20_000,
         lr_schedule=_optimizer.CosineDecaySchedule(
             peak_lr=2.5e-6,
