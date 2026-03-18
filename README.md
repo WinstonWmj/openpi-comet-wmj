@@ -223,7 +223,7 @@ python OmniGibson/omnigibson/learning/eval_custom.py policy=websocket \
 where `parallel_evaluator_start_idx` and `parallel_evaluator_end_idx` are the start and end index of the parallel rollout, we can distribute the rollout to multiple GPUs by splitting the total number of instances into multiple parts.
 
 3. Build the RFT dataset:
-After the rollout, you can build the RFT dataset by following [Data Generation README.md](data_generation/rft/README.md)
+After the rollout, you can build the RFT dataset by following [Data Generation README.md](data_generation/rft/README.md). If your rollouts are under BEHAVIOR eval output (e.g. `$LOG_PATH/outputs/rft/rollouts/`), use the outputs directory as the rollouts root and pass `--task-name $TASK_NAME` when generating the index (see that README).
 
 Then, we can perform RFT training on the RFT dataset. Please refer to the [RFT training config](src/openpi/training/config.py) for more details.
 

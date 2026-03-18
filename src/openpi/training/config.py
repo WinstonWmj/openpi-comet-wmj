@@ -776,7 +776,7 @@ _CONFIGS = [
     ),
     # 3. RFT Configs
     TrainConfig(
-        name="pi05_b1k-turning_on_radio_lr2.5e-6_step20k_rft",
+        name="pi05_b1k-freeze_pies_lr2.5e-6_step20k_rft",
         exp_name="openpi",
         project_name="B1K",
         model=pi0_config.Pi0Config(pi05=True, action_horizon=32),
@@ -785,7 +785,7 @@ _CONFIGS = [
             base_config=DataConfig(
                 prompt_from_task=True,
                 behavior_dataset_root="../DATASETS/behavior/2025-challenge-demos-rft",
-                tasks=["turning_on_radio"],
+                tasks=["freeze_pies"],
                 fine_grained_level=0,  # 0, 1, 2
             ),
         ),

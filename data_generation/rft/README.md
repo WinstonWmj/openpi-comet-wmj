@@ -26,9 +26,10 @@ python data_generation/rft/generate_rft_index.py \
 
 **Arguments:**
 
-- `root_dir`: Root directory containing the rollout data (e.g., organized by date/experiment).
+- `root_dir`: Root directory containing the rollout data (e.g., organized by date/experiment). For BEHAVIOR eval output like `outputs/rft/rollouts/0242_0000/`, use the **parent of the folder that contains `rollouts`** (e.g. `.../outputs`, not `.../outputs/rft`).
 - `output_jsonl`: Path where the generated index JSONL file will be saved.
 - `--tasks_jsonl`: Path to the `tasks.jsonl` file containing task name to index mappings (default: `2025-challenge-demos/meta/tasks.jsonl`).
+- `--task-name`: Optional. When the run directory has no `cfg*.out` (e.g. BEHAVIOR eval only writes `rollouts/`), pass the task name used for that run so all runs under that experiment are assigned to this task (e.g. `--task-name turning_on_radio`).
 
 ### 2. `convert_rft_data.py`
 
@@ -62,6 +63,23 @@ python data_generation/rft/convert_rft_data.py \
 - `--template-root`: Path to an existing dataset (e.g., `2025-challenge-demos`) to copy meta/annotation templates from.
 - `--num-workers`: Number of parallel workers (default: 32).
 - `--no-skip-existing`: Flag to force reprocessing of existing outputs.
+
+## Using BEHAVIOR eval output
+
+If rollouts were produced by running BEHAVIOR eval (e.g. from this repo) with `save_rollout=True`, the layout is usually `outputs/<exp>/rollouts/<run>/state_action.npz` and there is **no** `cfg*.out` file. In that case:
+
+1. Use **root_dir** = the directory that contains the experiment folder (e.g. `$BEHAVIOR_OUTPUTS` or `/path/to/BEHAVIOR-1K/outputs`), so that paths match `root_dir/*/rollouts/*`.
+2. Pass **`--task-name <task_name>`** with the task you ran (e.g. `turning_on_radio`). All runs under that experiment will be indexed under that task.
+
+Example:
+
+```bash
+python data_generation/rft/generate_rft_index.py \
+  /path/to/BEHAVIOR-1K/outputs \
+  ./data/indices/rollouts_v1.jsonl \
+  --tasks_jsonl data_generation/rft/tasks.jsonl \
+  --task-name turning_on_radio
+```
 
 ## Workflow Example
 

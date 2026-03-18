@@ -112,6 +112,12 @@ def main():
         default=Path("2025-challenge-demos/meta/tasks.jsonl"),
         help="Path to BEHAVIOR tasks.jsonl file",
     )
+    parser.add_argument(
+        "--task-name",
+        type=str,
+        default=None,
+        help="Override task name for all runs when cfg*.out is missing (e.g. single-task BEHAVIOR eval output under root/exp/rollouts/run)",
+    )
     args = parser.parse_args()
 
     if not args.tasks_jsonl.exists():
@@ -133,11 +139,14 @@ def main():
 
     # Cache task names for experiments
     exp_to_task = {}
+    default_task = args.task_name if (args.task_name and args.task_name in task_map) else None
+    if default_task:
+        print(f"Using --task-name={default_task} for experiments without cfg*.out")
     for _, _, _, run_path in valid_runs:
         # rollouts_dir is run_path.parent, exp_dir is run_path.parent.parent
         exp_dir = run_path.parent.parent
         if exp_dir not in exp_to_task:
-            task_name = get_task_name(exp_dir)
+            task_name = get_task_name(exp_dir) or default_task
             if task_name:
                 exp_to_task[exp_dir] = task_name
 
