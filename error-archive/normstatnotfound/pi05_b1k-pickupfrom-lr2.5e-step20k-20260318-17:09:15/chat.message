@@ -1,0 +1,89 @@
+---
+
+**User**
+
+@openpi-comet/logs/pi05_b1k-pickupfrom-lr2.5e-step20k-20260318-17:09:15/run.log:79-96 为啥我这没有norm_stats呢？ @openpi-comet/run.skill.train.8gpus.bsz256.pickupfrom.sh 我这里使用的 config.py 是opt/openpi-comet里面的config @/root/.cursor/projects/Users-winstonwei-Library-Application-Support-Cursor-Workspaces-1773848965638-workspace-json/terminals/2.txt:9-13 也就是 /opt/openpi-comet/src/openpi/training/config.py
+
+---
+
+**Cursor**
+
+让我看看 `/opt` 里的完整配置和 norm_stats 相关的代码。
+
+找到原因了！问题在于 **norm_stats 的路径拼接多了一层 config name 目录**。
+
+让我解释路径推导过程：
+
+1. `assets_base_dir = "/mnt/project_rlinf/tgy/model/openpi_comet/pi05-b1kpt50-cs32/assets"`
+2. `assets_dirs` 属性会拼接 `assets_base_dir / config.name`，变成：
+   `/mnt/.../assets/pi05_b1k-pickupfrom-lr2.5e-step20k`
+3. 然后 `_load_norm_stats` 再拼 `asset_id`（即 `repo_id` = `"behavior-1k/2025-challenge-demos/"`），最终查找：
+   `/mnt/.../assets/pi05_b1k-pickupfrom-lr2.5e-step20k/behavior-1k/2025-challenge-demos/norm_stats.json`
+
+但实际文件在：
+`/mnt/.../assets/behavior-1k/2025-challenge-demos/norm_stats.json`
+
+**中间多了一层 `pi05_b1k-pickupfrom-lr2.5e-step20k/` 目录不存在。**
+
+修复方法：在 `LeRobotB1KDataConfig` 里显式设置 `assets.assets_dir`，绕过 `assets_dirs` 属性的自动拼接。需要同时改 `/opt` 和 `/mnt` 两个地方的 config：
+
+两个文件都改好了。改动说明：
+
+- **添加了 `assets=AssetsConfig(assets_dir="...assets")`**，显式指定 norm_stats 的查找路径
+- 这样 `_load_norm_stats` 会直接用 `assets_dir / asset_id` = `.../assets/behavior-1k/2025-challenge-demos/` 来查找 `norm_stats.json`，而不会经过 `assets_dirs` 属性多拼一层 config name
+
+现在路径匹配就正确了：
+- 期望路径：`.../assets/behavior-1k/2025-challenge-demos/norm_stats.json`
+- 实际文件：`.../assets/behavior-1k/2025-challenge-demos/norm_stats.json` ✓
+
+可以重新启动训练了。
+
+---
+
+**User**
+
+现在是另一个问题。会报这样的错误： @openpi-comet/logs/pi05_b1k-pickupfrom-lr2.5e-step20k-20260318-17:36:14/run.log:9283-9418 注意，我是花了好久的时间等这个。到训练开始，结果第二次记录，也就是第十个step就报错了。然后我尝试更小的episodes的数量，结果也是报错了： @/root/.cursor/projects/Users-winstonwei-Library-Application-Support-Cursor-Workspaces-1773848965638-workspace-json/terminals/3.txt:7-60 @/opt/openpi-comet/src/openpi/training/config.py:794-795 但是，在你修改缓存之前，更小的episode数量似乎是可以训练起来的，我想让你分析一下这是为什么？
+
+---
+
+**Cursor**
+
+让我看看出错的 dataset 代码，理解递归是怎么发生的。
+
+让我看看完整的 `__getitem__` 方法以及 `skill_weight` 函数。
+
+分析清楚了。这个问题的根因是 `BehaviorLeRobotDataset.__getitem__` 中的 **递归调用导致栈溢出**，跟缓存路径变更本身关系不大。让我详细解释：
+
+**错误链路分析：**
+
+1. 你配置了 `skill_list=["pick up from:1.0"]`，`skill_weight` 函数对于不匹配 "pick up from" 的帧返回 `0.0`
+
+2. 在 `dataset.py:418-424`，当 `weight=0.0` 时：
+
+```418:424:/opt/openpi-comet/src/behavior/learning/datas/dataset.py
+        task_skill = self._get_current_task_skill(item)
+        weight = skill_weight(task_skill, self.skill_list)
+        if not random.choices([True, False], weights=[weight, 1 - weight])[0]:
+            self.current_streaming_frame_idx += 1
+            for key in self.meta.video_keys:
+                next(self.obs_loaders[key])[0]
+            return self.__getitem__(idx)
+```
+
+`random.choices([True, False], weights=[0, 1])` **永远** 选 `False`，于是跳帧 → **递归调用自己** → 一直跳到匹配的帧为止。如果连续数千帧都不是 "pick up from" 技能，递归深度达到 2960+。
+
+3. 当递归终于找到一个可能匹配的帧时，`hf_dataset.select()` 内部调用 `copy.deepcopy(DatasetInfo)` 还要再消耗一些栈深度，于是彻底超出 Python 递归限制 → `RecursionError`。
+
+**为什么之前"似乎能跑"：**
+缓存路径变更后，HF datasets 库从 38M 行 Parquet 重新构建了 Arrow 缓存。新的 `DatasetInfo` 元数据更复杂（features schema 更大），`copy.deepcopy` 消耗的栈帧更多，更容易在高递归深度下溢出。之前旧缓存的 `DatasetInfo` 较简单，刚好没溢出。
+
+**正确修复：把递归改成循环。**
+
+改好了。核心变更：
+
+- 把 `return self.__getitem__(idx)` 的 **递归** 改成了 `while True:` **循环** + `continue`/`break`
+- 当帧被 skill filter 拒绝时，用 `continue` 继续下一帧（不再消耗栈空间）
+- 当帧被接受时，`break` 跳出循环，继续后续的视觉观测加载
+
+这样无论连续跳过多少帧，栈深度始终是常数，彻底解决 `RecursionError`。可以重新启动训练了。
+

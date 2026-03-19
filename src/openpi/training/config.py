@@ -775,21 +775,28 @@ _CONFIGS = [
         batch_size=8 * 32,
     ),
     # 3. RFT Configs
+    # now is the config for skill training
     TrainConfig(
-        name="pi05_b1k-turning_on_radio_lr2.5e-6_step20k_rft",
+        name="pi05_b1k-pickupfrom-lr2.5e-step20k",
         exp_name="openpi",
         project_name="B1K",
         model=pi0_config.Pi0Config(pi05=True, action_horizon=32),
         data=LeRobotB1KDataConfig(
-            repo_id="behavior-1k/2025-challenge-demos",
+            repo_id="behavior-1k/2025-challenge-demos/",
+            assets=AssetsConfig(
+                assets_dir="/mnt/project_rlinf/tgy/model/openpi_comet/pi05-b1kpt50-cs32/assets",
+            ),
             base_config=DataConfig(
                 prompt_from_task=True,
-                behavior_dataset_root="../DATASETS/behavior/2025-challenge-demos-rft",
-                tasks=["turning_on_radio"],
-                fine_grained_level=0,  # 0, 1, 2
+                episodes_index=list(range(1)),
+                behavior_dataset_root="/mnt/project_rlinf_hs/mjwei/download_models/2025-challenge-demos/",
+                fine_grained_level=2,  # 0: global instruction, 1: skill name, 2: subtask description
+                skill_list=["pick up from:1.0"],
             ),
         ),
-        weight_loader=weight_loaders.CheckpointWeightLoader("path_to_your_pretrained_checkpoint"),
+        weight_loader=weight_loaders.CheckpointWeightLoader(
+            "/mnt/project_rlinf/tgy/model/openpi_comet/pi05-b1kpt50-cs32/params"
+        ),
         num_train_steps=20_000,
         lr_schedule=_optimizer.CosineDecaySchedule(
             peak_lr=2.5e-6,
@@ -797,7 +804,11 @@ _CONFIGS = [
         ),
         freeze_filter=pi0_config.Pi0Config(pi05=True, action_horizon=32).get_freeze_filter(),
         ema_decay=None,
-        checkpoint_base_dir=".",
+        assets_base_dir="/mnt/project_rlinf/tgy/model/openpi_comet/pi05-b1kpt50-cs32/assets",
+        checkpoint_base_dir="/mnt/project_rlinf_hs/mjwei/download_models/behavior-1k/skill-comet",
+        log_interval=10,
+        save_interval=5000,
+        keep_period=5000,
         num_workers=8,
         batch_size=8 * 32,
     ),

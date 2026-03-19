@@ -1,0 +1,70 @@
+# Disk space issue during training script
+_Exported on 2026/3/19 at GMT+8 10:11:16 from Cursor (2.6.12)_
+
+---
+
+**User**
+
+@openpi-comet/logs/pi05_b1k-pickupfrom-lr2.5e-step20k-20260318-16:35:53/run.log:2990-3039 我启动了训练脚本 @openpi-comet/run.skill.train.8gpus.bsz256.pickupfrom.sh ，居然磁盘不够了？我的空间还是挺大的，为啥不够了？
+
+---
+
+**Cursor**
+
+让我先看看磁盘使用情况和默认缓存目录的位置。
+
+原因找到了。问题的根源是 **HuggingFace datasets 的 Arrow 缓存写在了容器根分区上**，而根分区只有 100G。
+
+具体分析：
+
+1. **当前环境中 `HF_HOME=/opt/.cache/huggingface`**，这个路径位于 overlay 根文件系统上，**总共只有 100G**。
+
+2. 你的数据集有 **38,449,980 条样本**，HuggingFace `datasets` 库在 `load_dataset("parquet", ...)` 时会把 Parquet 文件转换成 Arrow 格式并缓存到 `$HF_HOME/datasets/` 下。这么大的数据集，Arrow 缓存轻松超过 100G。
+
+3. 你真正有空间的是 NFS 挂载盘：
+   - `/mnt/project_rlinf` — 64T 可用
+   - `/mnt/project_rlinf_hs` — 295T 可用
+
+4. **你的脚本里其实已经写好了解决方案，但被注释掉了**：
+
+```5:14:/mnt/project_rlinf/mjwei/repo/openpi-comet/run.skill.train.8gpus.bsz256.pickupfrom.sh
+# export OPENPI_DATA_HOME="/mnt/project_rlinf_hs/mjwei/repo/openpi-comet/cache/openpi"
+# export XDG_CACHE_HOME="/mnt/project_rlinf_hs/mjwei/repo/openpi-comet/cache/xdg"
+# export TMPDIR="/mnt/project_rlinf_hs/mjwei/repo/openpi-comet/cache/tmp"  # 修正路径
+# export JAX_COMPILATION_CACHE_DIR="/mnt/project_rlinf_hs/mjwei/repo/openpi-comet/cache/jax"
+# ...
+# mkdir -p "$OPENPI_DATA_HOME"
+# mkdir -p "$XDG_CACHE_HOME"
+# mkdir -p "$TMPDIR"
+# mkdir -p "$JAX_COMPILATION_CACHE_DIR"
+```
+
+**解决方案**：取消注释这些缓存目录配置，并额外加上 `HF_HOME` 的重定向。我来帮你改：
+
+改好了。总结一下改动：
+
+- **取消注释**了 `OPENPI_DATA_HOME`、`XDG_CACHE_HOME`、`TMPDIR`、`JAX_COMPILATION_CACHE_DIR` 的 export
+- **新增** `export HF_HOME=...` — 这是最关键的一行，把 HuggingFace 的缓存（包括 datasets 的 Arrow 缓存）从 `/opt/.cache/huggingface`（100G 根分区）重定向到 `/mnt/project_rlinf_hs/`（295T 可用）
+- 把多个 `mkdir -p` 合并成一行
+
+重新运行脚本应该就不会再出磁盘空间不足的问题了。
+
+---
+
+**User**
+
+@/root/.cursor/projects/Users-winstonwei-Library-Application-Support-Cursor-Workspaces-1773848965638-workspace-json/terminals/2.txt:21-23 但是会有重新下载model的问题，可否直接复制过去
+
+---
+
+**Cursor**
+
+明白，因为缓存路径改了，所以之前下载到 `/opt/.cache/` 的模型文件需要重新下载。直接把旧缓存复制过去就行。
+
+旧缓存在 `/root/.cache/openpi/`（只有 4.1M 的 `paligemma_tokenizer.model`），直接复制过去：
+
+看起来当前这次训练已经自动下载完成了（文件已存在，4.1M）。这个 tokenizer 模型很小，下载很快，所以影响不大。
+
+不过好消息是 **这次之后就不用再下了** — 因为现在缓存在 `/mnt/project_rlinf_hs/` 持久化盘上，后续重启容器或再次训练都会直接读取这个缓存，不需要重新下载。
+
+从终端输出看，训练已经跑过了这一步，应该在正常运行了。你可以关注一下后续的 training log 看有没有其他问题。

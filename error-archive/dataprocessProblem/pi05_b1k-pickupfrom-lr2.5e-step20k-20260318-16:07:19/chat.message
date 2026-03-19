@@ -1,0 +1,690 @@
+# Subtask training analysis
+_Exported on 2026/3/19 at GMT+8 10:19:38 from Cursor (2.6.12)_
+
+---
+
+**User**
+
+@openpi-comet/src/behavior/learning/datas/dataset.py:240-252 请帮我分析一下，如果使用这个启动脚本 @openpi-comet/run.rft.train.sh:1-52 我只需要加上 @openpi-comet/README.md:147-148 就能进行子任务的训练吗？什么是subtasks？什么是skill？数据在这里 /mnt/project_rlinf_hs/mjwei/download_models/2025-challenge-demos （这个数据里面的py脚本和skill_training_data文件夹都是我后来加上的，不应该纳入你的考虑中 ） @openpi-comet/README.md:147-148 
+
+---
+
+**Cursor**
+
+让我先深入分析相关的代码和数据结构，以便全面回答你的问题。
+
+让我再确认一下数据中 annotation 的具体结构和代码中 orchestrators 的加载逻辑。
+
+现在我有了完整的理解。下面给你一个全面的分析。
+
+---
+
+## 结论：不能，仅加 `fine_grained_level` 不够
+
+你的数据目录 `/mnt/project_rlinf_hs/mjwei/download_models/2025-challenge-demos` **没有 `orchestrators/` 目录**，所以即使你在配置中设置 `fine_grained_level=1` 或 `2`，也无法实现真正的子任务/技能训练。下面详细解释原因。
+
+---
+
+## 一、orchestrators 的加载逻辑
+
+关键代码在 `load_orchestrators` 方法中：
+
+```638:655:/mnt/project_rlinf/mjwei/repo/openpi-comet/src/behavior/learning/datas/dataset.py
+    def load_orchestrators(self, local_dir: Path) -> dict:
+        orchestrators_path = local_dir / ORCHESTRATORS_PATH
+        orchestrators = {
+            episode_key: load_orchestrators_data(episode_data["tasks"][0], episode_data["length"])
+            for episode_key, episode_data in sorted(self.episodes.items())
+        }
+        if orchestrators_path.exists():
+            for task in self.tasks:
+                if (orchestrators_path / f"task-{task:04d}").exists():
+                    orchestrators.update(
+                        {
+                            int(episode.stem[8:]): load_orchestrators_data(
+                                episode, self.episodes[int(episode.stem[8:])]["length"]
+                            )
+                            for episode in sorted((orchestrators_path / f"task-{task:04d}").iterdir())
+                        }
+                    )
+        return orchestrators
+```
+
+它分两步：
+
+1. **默认初始化**：用 `episode_data["tasks"][0]`（一个字符串，如 `"turning on radio"`）调用 `load_orchestrators_data`。当传入的是字符串时，**所有 4 个 level 都填同一个全局任务文本**，覆盖整条 episode：
+
+```692:703:/mnt/project_rlinf/mjwei/repo/openpi-comet/src/behavior/learning/datas/dataset.py
+def load_orchestrators_data(episode_path_or_level_0_task, episode_len):
+    output_data = defaultdict(list)
+    if type(episode_path_or_level_0_task) == str:
+        for i in range(4):
+            output_data[i] = [
+                {
+                    "task": episode_path_or_level_0_task,
+                    "start_frame": 0,
+                    "end_frame": episode_len - 1,
+                }
+            ]
+        return output_data
+```
+
+2. **尝试覆盖**：检查 `orchestrators/` 目录是否存在。如果存在，从中读取细粒度的 JSON 文件来覆盖默认值。
+
+**你的数据里没有 `orchestrators/` 目录**，所以永远走的是步骤 1 —— 无论 `fine_grained_level` 设成 0、1、2 还是 3，拿到的 prompt 都是同一个全局任务文本。
+
+---
+
+## 二、什么是 Subtask？什么是 Skill？
+
+在 openpi-comet 的体系中，任务被分解成 **4 个粒度层级**（通过 `orchestrators` 目录中的 JSON 文件定义）：
+
+| Level | 名称 | 含义 | 数据来源 | 示例 |
+|-------|------|------|----------|------|
+| **0** | Global Task | 整条 episode 的总任务 | `task_annotated.json` → `cot_task_description` | `"Turn on the radio"` |
+| **1** | Skill | 技能级别的分段 | `subtask_{i}_annotated.json` → `skill_description` | `"move to"`, `"pick up from"`, `"press"` |
+| **2** | Subtask | 子任务级别的分段（CoT 描述） | `subtask_{i}_annotated.json` → `cot_subtask_description` | `"Navigate to the coffee table where the radio is located"` |
+| **3** | Event | 最细粒度的事件 | `event_{i}_{j}_annotated.json` → `subtask_answer_detailed` | 更详细的动作描述 |
+
+**Skill（Level 1）** 是较简短的动作原语描述（如 `"move to"`, `"pick up from"`），对应的是机器人的基本操作能力。
+
+**Subtask（Level 2）** 是更详细的 CoT（Chain-of-Thought）描述，解释为什么要执行这个动作、具体的目标对象和位置。
+
+训练时，代码通过 `bisect.bisect_right` 根据当前帧号找到对应的 skill/subtask 段，然后把该段的 `task` 文本作为模型的 prompt：
+
+```467:478:/mnt/project_rlinf/mjwei/repo/openpi-comet/src/behavior/learning/datas/dataset.py
+    def _get_fine_grained_task(self, item: dict) -> str:
+        ep_idx = item["episode_index"].item()
+        task_idx = item["task_index"].item()
+        frame_index = round(item["timestamp"].item() * self.fps)
+        try:
+            sub_idx = bisect.bisect_right(self.task_sizes[ep_idx], frame_index, hi=len(self.task_sizes[ep_idx]) - 1)
+            task_text = self.meta.orchestrators[ep_idx][self.fine_grained_level][sub_idx]["task"]
+        except Exception as e:
+            print(f"[warn] {self.repo_id} failed to get subtask {item}: {e}")
+            task_text = self.meta.tasks[task_idx]
+        return task_text
+```
+
+---
+
+## 三、你的数据里已有的 skill 信息
+
+好消息是，你的数据 `annotations/` 目录里**已经有 skill 标注**，格式如下：
+
+```json
+{
+  "skill_annotation": [
+    {
+      "skill_idx": 0,
+      "skill_description": ["move to"],
+      "frame_duration": [0, 265],
+      "skill_type": ["navigation"]
+    },
+    {
+      "skill_idx": 1,
+      "skill_description": ["pick up from"],
+      "frame_duration": [265, 1162],
+      "skill_type": ["uncoordinated"]
+    },
+    {
+      "skill_idx": 2,
+      "skill_description": ["press"],
+      "frame_duration": [1162, ...],
+      ...
+    }
+  ]
+}
+```
+
+但这些 `annotations/` 数据和 `orchestrators/` 是**两套独立的数据**。代码通过 `load_annotations` 加载 annotations（用于其他用途），通过 `load_orchestrators` 加载 orchestrators（用于 `fine_grained_level` 训练）。**这两者之间没有自动转换**。
+
+---
+
+## 四、要真正实现子任务/技能训练，需要做什么
+
+你需要**从现有的 `annotations/` 数据生成 `orchestrators/` 目录**。具体来说，在数据根目录下创建如下结构：
+
+```
+orchestrators/
+  task-0000/
+    episode_00000010/     # 注意是目录，不是 .json 文件
+      task_annotated.json
+      subtask_0_annotated.json
+      subtask_1_annotated.json
+      ...
+    episode_00000020/
+      ...
+  task-0001/
+    ...
+```
+
+每个文件的格式要求：
+
+**`task_annotated.json`：**
+```json
+{
+  "cot_task_description": "Turn on the radio",
+  "cot_subtask_description_list": ["Navigate to radio", "Pick up radio", "Press button"]
+}
+```
+
+**`subtask_{i}_annotated.json`：**
+```json
+{
+  "skill_description": "move to",
+  "cot_subtask_description": "Navigate to the coffee table where the radio is located",
+  "start_frame": 0,
+  "end_frame": 265
+}
+```
+
+你可以写一个转换脚本，从每个 episode 的 `annotations/task-XXXX/episode_XXXXXXXX.json` 中读取 `skill_annotation`，然后生成对应的 orchestrators 结构。核心映射关系是：
+
+- `skill_annotation[i].skill_description[0]` → `subtask_{i}_annotated.json` 的 `skill_description`（Level 1）
+- `skill_annotation[i].skill_description[0]` → 也可暂时复用为 `cot_subtask_description`（Level 2），或用更详细的描述
+- `skill_annotation[i].frame_duration[0]` → `start_frame`
+- `skill_annotation[i].frame_duration[1]` → `end_frame`
+
+生成好 `orchestrators/` 目录后，再在训练配置中设置 `fine_grained_level=1`（skill 训练）或 `fine_grained_level=2`（subtask 训练），就能正常工作了。
+
+---
+
+## 总结
+
+| 问题 | 答案 |
+|------|------|
+| 只加 `fine_grained_level` 能训练子任务吗？ | **不能**。数据缺少 `orchestrators/` 目录，所有 level 都退化为全局任务 |
+| Skill 是什么？ | Level 1，简短的动作原语（如 `"move to"`, `"pick up from"`） |
+| Subtask 是什么？ | Level 2，更详细的 CoT 子任务描述 |
+| 需要做什么？ | 从 `annotations/` 中的 `skill_annotation` 生成 `orchestrators/` 目录结构 |
+
+需要我帮你写这个转换脚本吗？
+
+---
+
+**User**
+
+很好，我需要你生成这个转换脚本，其能够得到orchestrators文件夹
+
+---
+
+**Cursor**
+
+让我先仔细看一下 annotation 文件的完整结构和 `load_orchestrators_data` 的完整逻辑，确保生成的格式完全正确。
+
+现在我对所有数据格式都清楚了，来编写转换脚本。
+
+先用 `--dry_run` 看看数据统计，确认一切正常：
+
+数据统计看起来完全正常。50 个 task，9525 个 episode，共 218610 个 skill 标注。现在正式运行：
+
+`spatial_prefix` 里有嵌套列表，修复一下：
+
+`spatial_prefix` 是嵌套列表 `[["left"]]`。修复 `build_subtask_description` 函数来处理嵌套结构：
+
+---
+
+**User**
+
+@2025-challenge-demos/generate_orchestrators.py 这里对于prompt的设计有点鲁莽了，我需要你帮我show出来所有的50个task的skill，因为有一些skill对应了两个物体，需要特别设计prompt的组合
+
+---
+
+**Cursor**
+
+内容太多了，让我分段读取并以更紧凑的方式展示。
+
+数据量太大了，让我生成一个更有价值的汇总 —— 按 **skill 类型** 归纳所有物体模式，这样能更清楚地看到需要怎么设计 prompt。
+
+现在你可以看到完整的 skill 类型全景了。让我帮你整理出关键发现。
+
+---
+
+## 关键分析
+
+整个数据集共有 **28 种 skill 类型**，从物体数量和角色看，可以归纳为以下几类模式：
+
+### 1. 单物体 skills（只有 target 或 manip）
+`move to`, `press`, `close lid`, `open lid`, `hold`, `release`, `turn on/off switch`, `open/close door`, `open/close drawer`, `tip over`, `pull/push tray`
+
+### 2. 双物体 skills（manip + target）
+`pick up from`, `place in`, `place on`, `place under`, `push to`, `chop`, `spray`, `ignite`, `hang`, `attach`, `wipe hard`, `insert`, `turn to`
+
+其中 `pick up from(A + B)` 意思是 **从 B 上拿起 A**；`place in(A + B)` 是 **把 A 放进 B**。
+
+### 3. 三物体 skills（manip + target + reference）
+`place on next to`, `place in next to`
+
+例如：`place on next to(knife + countertop + cutting_board)` spa=`right` 意思是 **把刀放在台面上，位于砧板的右边**。
+
+### 4. 多物体 skills
+`pour` 可能涉及多达 10+ 个物体（倒出的内容物 + 源容器 + 目标容器），`hand over` 涉及物体 + 左/右手，`sweep off` 涉及多个碎片。
+
+### 5. 需要特别注意的修饰信息
+- **`memory_prefix`**：如 `"back"`, `"the other"`, `"the same"` — 指代之前操作过的物体
+- **`spatial_prefix`**：如 `"left"`, `"right_door"`, `"in_front_of"`, `"under"`, `"to_the_edge_of"`, `"layer_4"`, `"2X1"` (书架位置) — 空间位置信息
+
+---
+
+现在你看到了全貌，你希望 prompt 怎么设计？我看到几种可能的方案：
+
+1. **结构化模板**：`"[memory] [skill] [manip_object] [preposition] [target_object] [spatial]"`，例如 `"the other pick up from radio coffee_table"` → `"pick up the other radio from the coffee table"`
+2. **自然语言生成**：为每种 skill 设计专门的自然语言模板，如 `pick up from(A, B)` → `"Pick up {A} from {B}"`，`place on next to(A, B, C)` + spa=right → `"Place {A} on {B}, to the right of {C}"`
+3. **保持简短原子式**：直接用 `skill_description[0]` 作为 prompt（当前脚本的做法）
+
+你倾向哪种方式？或者你有其他想法？
+
+---
+
+**User**
+
+现在还需要你把50个tasks的对应的object都拿出来看看，然后，分类是，物体a有skill_1 skill_2，我来看看
+
+---
+
+**Cursor**
+
+全部 50 个 task 的物体-技能映射已经展示完毕。这份数据完整展示了每个 task 中每个物体参与了哪些 skill 以及角色（`manip` = 被操纵物，`target` = 目标/容器/表面）。
+
+几个值得关注的模式：
+
+**典型双角色物体**（同一物体既是 manip 又是 target）：
+- `trash_can`（task 1）：被 `pick up from` 时既是 manip 也是 target（先被放下再被搬到位）
+- `hinged_jar`（task 4）：`pick up from` 和 `place in` 时既是 manip 也是 target（既要被拿出/放回柜子，又要作为容器装肉）
+- `wicker`（task 6/20/26）：篮子本身被搬动（manip），同时也作为容器（target）
+- `toy_box`（task 7/13）：容器本身也被移动
+- `tupperware`（task 25/47/49）：既是装食物的容器，也需要被搬进冰箱
+
+**三物体 skills**（需要特别设计 prompt 模板）：
+- `place on next to(A, B, C)` spa=xxx：把 A 放在 B 上/C 旁边
+- `place in next to(A, B, C)` spa=xxx：把 A 放进 B 里/C 旁边
+- `pour(多个内容物, 源容器, 目标)`: 可达 10+ 物体
+
+你现在看到了全景，接下来你想如何设计 prompt 模板？
+
+---
+
+**User**
+
+@/root/.cursor/projects/mnt-project-rlinf-hs-mjwei-repo-RLinf-wph-RLinf/agent-tools/846dae01-ddef-4306-8676-bfecaeaa17d0.txt:432-433 怎么有这么多left和right，这是什么物体？
+
+---
+
+**Cursor**
+
+`left` 和 `right` 不是物体，它们是 `hand over` 技能中**机器人的左右手**。`hand over` 的语义是：**将物体从一只手传递到另一只手**。
+
+看 annotation 原始数据的结构：
+
+```json
+{
+  "skill_description": ["hand over"],
+  "object_id": [["hinged_jar_235", "left", "right"]],
+  "manipulating_object_id": ["hinged_jar_235"]
+}
+```
+
+意思是：**把 hinged_jar 从左手交到右手**。
+
+---
+
+但你注意到了一个数据质量问题——这些 "手" 的标注非常不一致：
+
+| 出现形式 | 所在 task |
+|----------|----------|
+| `left` / `right` | 大部分 task |
+| `Left` / `Right` | task 28, 36 |
+| `lefe` | task 14 |
+| `rigft` | task 14 |
+| `riqht` | task 7 |
+| `left\n` / `right\n` | task 14 |
+
+这些都是**标注者的拼写错误和格式问题**（`lefe`=left, `rigft`=right, `riqht`=right，还有末尾带换行符的）。
+
+对于 prompt 设计来说，`hand over` 这个 skill 里的 `left`/`right` **不应该被当作物体名写进 prompt**，它们只是描述手的方向。合理的 prompt 应该是类似 `"hand over hinged jar from left to right"` 或者干脆简化为 `"hand over hinged jar"`，而不是把 `left`/`right` 当成独立物体。
+
+你在重新设计 `generate_orchestrators.py` 的 prompt 生成逻辑时，需要对 `hand over` 做特殊处理。需要我现在就更新脚本吗？
+
+---
+
+**User**
+
+@/root/.cursor/projects/mnt-project-rlinf-hs-mjwei-repo-RLinf-wph-RLinf/agent-tools/846dae01-ddef-4306-8676-bfecaeaa17d0.txt:1-632 很好，除了 handover，看看还有没有其他的skill是不能直接套用自然语言生成的模板的
+
+---
+
+**Cursor**
+
+让我逐一审查所有 28 种 skill 的 `object_id` 原始结构，找出不能直接套模板的。
+
+清楚了。除了 `hand over`，还有以下 skill 不能直接套自然语言模板：
+
+---
+
+## 需要特殊处理的 skills
+
+### 1. `pour` (3000x) — **最复杂，物体数量不固定（3~11个）**
+
+结构是 `[内容物1, 内容物2, ..., 源容器(M), 目标(T)]`：
+
+| 物体数 | 结构 | 例子 | 次数 |
+|--------|------|------|------|
+| 3 | `[T, M, T]` | diced_pineapple, cutting_board, bowl | 1799 |
+| 4 | `[T, T, M, T]` | carton_of_milk, ..., paper_bag, breakfast_table | 200 |
+| 6 | `[T,T,T,T, M, T]` | pepperoni x4, tupperware, bowl | 401 |
+| 8 | `[T,T,T,T,T,T, M, T]` | candy_cane x3, pillar x2, wreath, wicker, sofa | 398 |
+| **11** | `[T x9, M, T]` | pepperoni x4, mushroom x4, diced_onion, bowl, pizza_dough | 200 |
+
+前 N-2 个都是被倒出的内容物，倒数第二个是源容器（M），最后一个是目标（T）。无法用固定模板，需要动态拼接。
+
+### 2. `sweep off` (417x) — **双 manip + target**
+
+结构固定为 `[M, M, T]`：`half_log, half_log, driveway`。两个 M 是被扫落的碎片，T 是表面。和其他所有 skill 的 `[M, T]` 或 `[M, T, T]` 不同。
+
+### 3. `push to` / `turn to` 中 target 为 `robot` — **robot 不是物体**
+
+- `push to(A, robot)` spa=`away` / `near`（683x + 48x）：意思是「把 A 推离/推向自己」
+- `turn to(A, robot)` spa=`face` / `face_away`（374x + 233x）：意思是「把 A 转向/背对自己」
+
+`robot` 不是场景中的物体，而是指机器人自身。prompt 不应该写成 "push A to robot"，而应该是 "push A away" 或 "turn A to face away"。
+
+### 4. `place on` 的角色反转（极少，7x）
+
+- `[T, T]` 6x — 两个都不在 `manipulating_object_id` 里
+- `[M, M]` 1x — 两个都在 `manipulating_object_id` 里
+
+这是标注错误，数量极少可以走 fallback。
+
+---
+
+## 可以用模板但需要 3 物体模板的
+
+- `place on next to` (7667x)：`[M, T, T]` + spa → "place {A} on {B}, {spa} {C}"
+- `place in next to` (400x)：`[M, T, T]` + spa → "place {A} in {B}, {spa} {C}"
+
+这两个虽然是 3 物体，但结构固定，可以设计模板。
+
+---
+
+## 总结分类
+
+| 类别 | Skills | 处理方式 |
+|------|--------|----------|
+| 直接套模板 | `move to`, `pick up from`, `place in`, `place on`, `place under`, `chop`, `spray`, `insert`, `hang`, `attach`, `wipe hard`, `sweep surface`, `ignite`, `press`, `hold`, `release`, `tip over`, `close/open lid`, `close/open door`, `close/open drawer`, `turn on/off switch`, `pull/push tray` | `"{skill} {A} {prep} {B}"` |
+| 3 物体固定模板 | `place on next to`, `place in next to` | `"place {A} on/in {B}, {spa} {C}"` |
+| **特殊处理** | `hand over` | `"hand over {A} from {hand1} to {hand2}"` |
+| **特殊处理** | `pour` | 动态拼接内容物列表 |
+| **特殊处理** | `sweep off` | `"sweep off {A} from {B}"` (双M) |
+| **特殊处理** | `push to` / `turn to` 含 robot | 用 spa 替代 robot |
+
+需要我现在更新 `generate_orchestrators.py`，把这些特殊处理都加进去吗？
+
+---
+
+**User**
+
+好，请现在更新@2025-challenge-demos/generate_orchestrators.py 把这些特殊处理都加进去
+
+---
+
+**Cursor**
+
+先用 `--preview` 看看每个 task 第一个 episode 的 prompt 生成效果：
+
+让我再检查几个特殊的 task（pour、sweep off、turn to with robot）：
+
+效果整体很好了！但我发现还有几个小问题需要修：
+
+1. **`push to` 的 spatial 拼接缺介词**：`"push gift box center christmas tree"` → 应该是 `"push gift box to center of christmas tree"`
+2. **`diced__` 双下划线产生双空格**：`"pour diced  head cabbage"` → 应该是 `"pour diced head cabbage"`
+3. **半成品物体名残留数字**：`"half log 176"`, `"half pineapple 211"` → 应该去掉末尾数字
+
+让我修复这些问题：
+
+现在修复 `push to` 的 spatial 拼接问题：
+
+重新 preview 验证修复效果：
+
+所有修复都生效了。来看下修复前后的对比：
+
+| 修复前 | 修复后 |
+|--------|--------|
+| `push gift box center christmas tree` | `push gift box to center of christmas tree` |
+| `push toolbox center countertop` | `push toolbox to center of countertop` |
+| `push swivel chair left desk` | `push swivel chair to left of desk` |
+| `push teddy bear reorient bottom cabinet no top` | `push teddy bear to reorient on bottom cabinet no top` |
+| `pour diced  head cabbage from...` | `pour diced head cabbage from...` |
+| `half log 176` | `half log` |
+| `half pineapple 211` | `half pineapple` |
+| `half vidalia onion 75` | `half vidalia onion` |
+| `push garden chair away` | `push garden chair away` (robot 正确处理) |
+| `turn food processor to face away` | `turn food processor to face away` (robot 正确处理) |
+
+现在删掉旧的 orchestrators 目录，重新生成：
+
+好的，脚本已经更新完毕。你可以在需要的时候自己运行以下命令来重新生成：
+
+```bash
+rm -rf /mnt/project_rlinf_hs/mjwei/download_models/2025-challenge-demos/orchestrators
+cd /mnt/project_rlinf_hs/mjwei/download_models/2025-challenge-demos
+python generate_orchestrators.py
+```
+
+脚本现在支持三种模式：
+- `python generate_orchestrators.py` — 正式生成 orchestrators 目录
+- `python generate_orchestrators.py --dry_run` — 只统计，不写文件
+- `python generate_orchestrators.py --preview` — 展示每个 task 第一个 episode 的 prompt 效果
+
+---
+
+**User**
+
+@2025-challenge-demos/generate_orchestrators.py:123-124 我请问这个memory_prefix是什么？
+
+---
+
+**Cursor**
+
+`memory_prefix` 是标注数据中的一个**上下文指代前缀**，它描述的不是物理位置，而是**基于机器人之前操作记忆的指代关系**。
+
+从数据中我们看到了三种值：
+
+| 值 | 含义 | 例子 |
+|---|---|---|
+| `["back"]` | 回到之前去过的位置/物体 | `back move to fridge` = 回到冰箱（之前已经去过） |
+| `["the other"]` | 同类物体中的另一个 | `the other pick up can of soda` = 拿起另一罐汽水 |
+| `["back", "the other"]` | 回去拿同类的另一个 | `back the other move to plate` = 回去找另一个盘子 |
+| `["the same"]` | 之前操作过的同一个（极少） | `the same open door of fridge` |
+
+本质上，当场景中有多个同类物体（比如 3 罐汽水、2 个盘子），标注者用 `"the other"` 来区分「拿第一个」vs「拿另一个」；用 `"back"` 来表示「返回之前的位置继续操作」。
+
+在当前脚本中，`memory_prefix` 被直接拼在 prompt 最前面，例如：
+- `"the other pick up can of soda from floors"`
+- `"back move to fridge"`
+
+这对于 `fine_grained_level` 训练是有意义的——它告诉模型当前的 subtask 和上一步操作的关系，帮助模型理解操作序列中的上下文。不过，如果你觉得这种前缀对训练有干扰，也可以选择去掉。
+
+---
+
+**User**
+
+看起来没啥用，只有三种值，这个标注不要也罢。请修改生成脚本，去掉这些memory_prefix
+
+---
+
+**Cursor**
+
+还有 32 处引用需要全部去掉。
+
+Now replace all `mem_prefix` in push to / turn to block:
+
+确认没有遗留的 `mem_prefix`：
+
+全部清除了。快速验证一下：
+
+所有 `memory_prefix`（如 "back"、"the other" 等）已全部从 prompt 生成中移除。现在生成的 prompt 都是干净的，只包含 skill 动作 + 物体名 + 空间信息，不再有这些意义不大的记忆前缀了。
+
+---
+
+**User**
+
+ok，现在终于是处理好了数据 @2025-challenge-demos/generate_orchestrators.py 。我想要用这个脚本 @openpi-comet/run.rft.train.8gpus.bsz256.skill-pickupfrom.sh 和这个config @openpi-comet/src/openpi/training/config.py:781-813  ，请问我是否还需要修改其他，代码，经过上面一系列的修改。我刚刚问的subtask的训练，现在是不是只要像这个readme所说的 @openpi-comet/README.md:147-148 把config里面的level改为1就能进行subtask的指令训练呢？请检查。 
+
+---
+
+**Cursor**
+
+让我仔细检查数据加载链路，确认 `fine_grained_level=1` 是否能直接工作。
+
+现在让我看一下 `load_orchestrators` 以及 `load_orchestrators_data`，确认 orchestrators 的层级映射关系。
+
+现在让我看一下我们生成的 orchestrators 文件的结构，和代码期望的对比。
+
+现在让我检查 `skill_list` 和 skill 过滤逻辑，确认没有其他需要调整的地方。
+
+现在让我检查 `load_orchestrators` 遍历 episode 的方式——注意它遍历的是目录（`iterdir()`），需要确认我们生成的目录名能被正确解析。
+
+现在让我检查 config 是如何传入 dataset 的，以及 `fine_grained_level` 参数在数据加载链路中的流转。
+
+让我检查一下 `DataConfig` 中是否有 `skill_list` 配置，以及数据加载链路完整性。
+
+好了，我已经完整追踪了从 config → data_loader → dataset → orchestrators 的整条数据链路。以下是关键发现：
+
+---
+
+**数据链路完整性检查通过**，`orchestrators/` 目录结构正确，`load_orchestrators` 能正确加载我们生成的文件。但有一个**关键问题**：
+
+## **`fine_grained_level` 的注释是反的！**
+
+你的 config 当前写的是：
+
+```793:793:/mnt/project_rlinf/mjwei/repo/openpi-comet/src/openpi/training/config.py
+                fine_grained_level=1,  # 0: global instruction, 1: subtask instruction, 2: skill instruction
+```
+
+但实际代码 `load_orchestrators_data` 的真实映射是：
+
+```714:734:/mnt/project_rlinf/mjwei/repo/openpi-comet/src/behavior/learning/datas/dataset.py
+    try:
+        num_level1_tasks = len(task_annotated_data["cot_subtask_description_list"])
+        for i in range(num_level1_tasks):
+            subtask_data = load_json(episode_path / f"subtask_{i}_annotated.json")
+            subtask = subtask_data["cot_subtask_description"]
+            start_frame, end_frame = subtask_data["start_frame"], subtask_data["end_frame"] - 1
+            skill = subtask_data["skill_description"]
+            output_data[1].append(
+                {
+                    "task": skill,           # Level 1 = skill_description
+                    // ...
+                }
+            )
+            output_data[2].append(
+                {
+                    "task": subtask,         # Level 2 = cot_subtask_description
+                    // ...
+                }
+            )
+```
+
+对应我们生成的文件：
+
+| Level | 字段 | 实际内容示例 |
+|-------|------|-------------|
+| **0** | `cot_task_description` | "Turn on the radio receiver that's on the table in the living room." |
+| **1** | `skill_description` | "move to"、"pick up from"、"press" (**纯 skill 名，没有物体**) |
+| **2** | `cot_subtask_description` | "move to radio"、"pick up radio from coffee table" (**我们精心设计的 prompt**) |
+
+**所以 README 注释把 1 和 2 搞反了。** 如果你设 `fine_grained_level=1`，训练时的 prompt 只会是裸 skill 名（如 "move to"），我们花大力气设计的自然语言 prompt 完全用不上。
+
+**要使用带物体名的详细 subtask prompt，应该设 `fine_grained_level=2`。**
+
+## 启动脚本的 config_name 不匹配
+
+脚本 `run.rft.train.8gpus.bsz256.skill-pickupfrom.sh` 当前写的是：
+
+```16:16:/mnt/project_rlinf/mjwei/repo/openpi-comet/run.rft.train.8gpus.bsz256.skill-pickupfrom.sh
+config_name=pi05_b1k-turning_on_radio_lr2.5e-step50k_rft
+```
+
+但你要用的 config 名字是 `pi05_b1k-pickupfrom-lr2.5e-step20k`（config.py 第 783 行）。需要改成一致。
+
+## 总结：需要做两处修改
+
+1. **config.py 第 793 行**：`fine_grained_level=1` → `fine_grained_level=2`（如果你要用我们设计的详细 prompt）
+2. **脚本第 16 行**：`config_name` 改成 `pi05_b1k-pickupfrom-lr2.5e-step20k`
+
+其他方面（orchestrators 文件结构、字段名、frame 边界、`prompt_from_task`、`skill_list` 等）都已正确对齐，不需要额外修改代码。
+
+---
+
+**User**
+
+跑起来发现有warning@2025-challenge-demos/orchestrators/task-0004/episode_00040170/subtask_16_annotated.json:4-11 @openpi-comet/src/behavior/learning/datas/dataset.py:719 [warn] /mnt/project_rlinf_hs/mjwei/download_models/2025-challenge-demos/orchestrators/task-0004/episode_00040170 failed to load orchestrators data: unsupported operand type(s) for -: 'list' and 'int', falling back to default task.
+
+我建议这么处理，首先请写个脚本检查看看这个list表示有多少，然后再写个脚本批量转换。如果这个转换之后跟其他的subtask有frame上的重叠也没关系。
+
+---
+
+**Cursor**
+
+先写个脚本扫描所有 orchestrators 文件，看看有多少 subtask 的 `start_frame`/`end_frame` 是 list 类型。
+
+清楚了：共 218610 个 subtask 文件中有 534 个是 list 类型，全部是 2 段。需要在 `generate_orchestrators.py` 中修复，将这些 2 段的拆成两个独立的 subtask。
+
+让我先看看当前脚本是怎么处理 `frame_duration` 的。
+
+让我看一下原始 annotation 中对应的 `frame_duration` 格式。
+
+明白了。`frame_duration` 格式是 `[[start1, end1], [start2, end2]]`，表示这个 skill 有两个不连续的时间段。当前代码直接取 `[0]` 和 `[1]`，导致把整个子列表写成了 `start_frame`/`end_frame`。
+
+需要修改 `convert_episode` 函数，把多段的 skill 拆成多个独立 subtask。
+
+现在重新生成 orchestrators。
+
+看来直接运行比较慢，之前跑过全量生成也花了不少时间。让我换个思路——只写一个**修复脚本**，单独扫描并修复有 list 类型 frame 的文件，而不是全量重新生成。
+
+Dry run 确认：284 个 episode 需要修复，总共新增 534 个 subtask 条目（每个 2 段的 list 拆成 2 个，多出 1 个）。现在执行实际修复。
+
+修复完成。验证一下之前报错的文件是否已修复。
+
+再跑一次检查，确认没有遗留的 list 类型 frame。
+
+修复完成，结果如下：
+
+- **修复了 284 个 episode**，将 534 个含 list 类型 frame 的 subtask 文件拆分
+- 每个原来的 2 段 `[start_frame, end_frame]` 被拆成 2 个独立的 subtask 文件（同样的 skill/prompt，各自独立的帧范围）
+- 所有 subtask 按顺序重新编号，对应的 `task_annotated.json` 也同步更新
+- 验证确认：**0 个遗留的 list 类型 frame**
+
+同时 `generate_orchestrators.py` 也已更新，后续重新生成时会自动正确处理多段 skill。你可以重新启动训练了。
+
+---
+
+**User**
+
+稍等，我应该是只要pickupfrom这个skill对应的subtask，请在代码的什么地方给我修改一下，使得能够过滤一下加载的数据 @2025-challenge-demos/orchestrators/task-0000/episode_00000010/subtask_1_annotated.json:2-3 
+
+---
+
+**Cursor**
+
+这个功能已经内置在代码里了！`DataConfig` 有一个 `skill_list` 参数，配合 dataset 中的 `skill_weight` 函数实现了 skill 过滤。
+
+让我确认一下过滤逻辑。
+
+逻辑已经很清楚了。`_get_current_task_skill` 读取 level 1 的 `skill_description`（如 "pick up from"），`skill_weight` 根据 `skill_list` 决定采样权重。当 `skill_list` 不包含 "all" 时，不在列表中的 skill 权重为 0（完全跳过）。
+
+只需要在 config 里加一行 `skill_list`：
+
+这样就行了。过滤的工作原理：
+
+1. 每个帧被取出时，`_get_current_task_skill` 通过帧位置查到当前所处的 skill 名称（level 1，如 "pick up from"、"move to"）
+2. `skill_weight("pick up from", ["pick up from:1.0"])` → 返回 `1.0`（保留）
+3. `skill_weight("move to", ["pick up from:1.0"])` → 不在列表中，返回 `0.0`（跳过）
+4. 权重为 0 的帧会被 `random.choices` 100% 丢弃，只有 "pick up from" 段的帧会被训练
+
+注意：这个过滤是在数据采样层面做的（跳过非目标 skill 的帧），不是预先裁剪数据。所有 episode 仍然会被加载，但只有落在 "pick up from" 时间段内的帧会被实际用于训练。
+
+这是 HuggingFace `datasets` 库在加载 parquet 时会把数据转成 Arrow 格式缓存到磁盘导致的。38,449,980 条数据的 Arrow 缓存非常大。让我帮你查一下磁盘空间和缓存位置。
+

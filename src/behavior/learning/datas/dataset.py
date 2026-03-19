@@ -354,74 +354,81 @@ class BehaviorLeRobotDataset(LeRobotDataset):
             rng = np.random.default_rng(self.seed + worker_id)
             self.current_streaming_chunk_idx = rng.integers(0, len(self._active_chunks)).item()
             self.current_streaming_frame_idx = self._active_chunks[self.current_streaming_chunk_idx][0]
-        # Current chunk iterated, move to next chunk
-        if self.current_streaming_frame_idx >= self._active_chunks[self.current_streaming_chunk_idx][1]:
-            self.current_streaming_chunk_idx += 1
-            # All data iterated, restart from beginning
-            if self.current_streaming_chunk_idx >= len(self._active_chunks):
-                self.current_streaming_chunk_idx = 0
-            self.current_streaming_frame_idx = self._active_chunks[self.current_streaming_chunk_idx][0]
-            self._should_obs_loaders_reload = True
-        item = self.hf_dataset[self.current_streaming_frame_idx]
-        item.pop("observation.task_info")
-        ep_idx = item["episode_index"].item()
+        
+        # 把 return self.__getitem__(idx) 的 递归 改成了 while True: 循环 + continue/break
+        while True:
+            # Current chunk iterated, move to next chunk
+            if self.current_streaming_frame_idx >= self._active_chunks[self.current_streaming_chunk_idx][1]:
+                self.current_streaming_chunk_idx += 1
+                # All data iterated, restart from beginning
+                if self.current_streaming_chunk_idx >= len(self._active_chunks):
+                    self.current_streaming_chunk_idx = 0
+                self.current_streaming_frame_idx = self._active_chunks[self.current_streaming_chunk_idx][0]
+                self._should_obs_loaders_reload = True
+            item = self.hf_dataset[self.current_streaming_frame_idx]
+            item.pop("observation.task_info")
+            ep_idx = item["episode_index"].item()
 
-        if self._should_obs_loaders_reload:
-            for loader in self.obs_loaders.values():
-                loader.close()
-            self.obs_loaders = dict()
-            # reload video loaders for new episode
-            self.current_streaming_episode_idx = ep_idx
-            for vid_key in self.meta.video_keys:
-                kwargs = {}
-                task_id = item["task_index"].item()
-                if "seg_instance_id" in vid_key:
-                    # load id list
-                    with open(
-                        self.root / "meta/episodes" / f"task-{task_id:04d}" / f"episode_{ep_idx:08d}.json",
-                    ) as f:
-                        meta = json.load(f)
-                        instance_id_mapping = json.loads(meta["ins_id_mapping"])
-                        instance_id_mapping = {int(k): v for k, v in instance_id_mapping.items()}
-                        self.omnigibson_mapping[ep_idx]["instance_id_mapping"] = instance_id_mapping
-                        self.omnigibson_mapping[ep_idx]["unique_ins_ids"][vid_key.split(".")[-1]] = meta[
-                            f"{ROBOT_CAMERA_NAMES['R1Pro'][vid_key.split('.')[-1]]}::unique_ins_ids"
-                        ]
-                        kwargs["id_list"] = th.tensor(
-                            self.omnigibson_mapping[ep_idx]["unique_ins_ids"][vid_key.split(".")[-1]]
+            if self._should_obs_loaders_reload:
+                for loader in self.obs_loaders.values():
+                    loader.close()
+                self.obs_loaders = dict()
+                # reload video loaders for new episode
+                self.current_streaming_episode_idx = ep_idx
+                for vid_key in self.meta.video_keys:
+                    kwargs = {}
+                    task_id = item["task_index"].item()
+                    if "seg_instance_id" in vid_key:
+                        # load id list
+                        with open(
+                            self.root / "meta/episodes" / f"task-{task_id:04d}" / f"episode_{ep_idx:08d}.json",
+                        ) as f:
+                            meta = json.load(f)
+                            instance_id_mapping = json.loads(meta["ins_id_mapping"])
+                            instance_id_mapping = {int(k): v for k, v in instance_id_mapping.items()}
+                            self.omnigibson_mapping[ep_idx]["instance_id_mapping"] = instance_id_mapping
+                            self.omnigibson_mapping[ep_idx]["unique_ins_ids"][vid_key.split(".")[-1]] = meta[
+                                f"{ROBOT_CAMERA_NAMES['R1Pro'][vid_key.split('.')[-1]]}::unique_ins_ids"
+                            ]
+                            kwargs["id_list"] = th.tensor(
+                                self.omnigibson_mapping[ep_idx]["unique_ins_ids"][vid_key.split(".")[-1]]
+                            )
+                    if "rgb" in vid_key:
+                        kwargs["train_rgb_type"] = self.train_rgb_type
+                    self.obs_loaders[vid_key] = iter(
+                        OBS_LOADER_MAP[vid_key.split(".")[2]](
+                            data_path=self.root,
+                            task_id=task_id,
+                            camera_id=vid_key.split(".")[-1],
+                            demo_id=f"{ep_idx:08d}",
+                            start_idx=self._active_chunks[self.current_streaming_chunk_idx][2],
+                            start_idx_is_keyframe=False,
+                            batch_size=1,
+                            stride=1,
+                            **kwargs,
                         )
-                if "rgb" in vid_key:
-                    kwargs["train_rgb_type"] = self.train_rgb_type
-                self.obs_loaders[vid_key] = iter(
-                    OBS_LOADER_MAP[vid_key.split(".")[2]](
-                        data_path=self.root,
-                        task_id=task_id,
-                        camera_id=vid_key.split(".")[-1],
-                        demo_id=f"{ep_idx:08d}",
-                        start_idx=self._active_chunks[self.current_streaming_chunk_idx][2],
-                        start_idx_is_keyframe=False,
-                        batch_size=1,
-                        stride=1,
-                        **kwargs,
                     )
-                )
-            self._should_obs_loaders_reload = False
+                self._should_obs_loaders_reload = False
 
-        query_indices = None
-        if self.delta_indices is not None:
-            query_indices, padding = self._get_query_indices(self.current_streaming_frame_idx, ep_idx)
-            query_result = self._query_hf_dataset(query_indices)
-            item = {**item, **padding}
-            for key, val in query_result.items():
-                item[key] = val
+            query_indices = None
+            if self.delta_indices is not None:
+                query_indices, padding = self._get_query_indices(self.current_streaming_frame_idx, ep_idx)
+                query_result = self._query_hf_dataset(query_indices)
+                item = {**item, **padding}
+                for key, val in query_result.items():
+                    item[key] = val
 
-        task_skill = self._get_current_task_skill(item)
-        weight = skill_weight(task_skill, self.skill_list)
-        if not random.choices([True, False], weights=[weight, 1 - weight])[0]:
-            self.current_streaming_frame_idx += 1
-            for key in self.meta.video_keys:
-                next(self.obs_loaders[key])[0]
-            return self.__getitem__(idx)
+            # 当帧被 skill filter 拒绝时，用 continue 继续下一帧（不再消耗栈空间）
+            task_skill = self._get_current_task_skill(item)
+            # 你配置了 skill_list=["pick up from:1.0"]，skill_weight 函数对于不匹配 "pick up from" 的帧返回 0.0，因此，对于不匹配的帧，random.choices 会返回 False，从而继续下一帧
+            weight = skill_weight(task_skill, self.skill_list)
+            if not random.choices([True, False], weights=[weight, 1 - weight])[0]:
+                self.current_streaming_frame_idx += 1
+                for key in self.meta.video_keys:
+                    next(self.obs_loaders[key])[0]
+                continue
+            # 当帧被接受时，break 跳出循环，继续后续的视觉观测加载
+            break
 
         # load visual observations
         for key in self.meta.video_keys:
