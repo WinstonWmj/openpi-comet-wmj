@@ -7,7 +7,7 @@ import orbax.checkpoint as ocp
 import sentencepiece
 from transformers import AutoProcessor
 
-import openpi.models.utils.fsq_tokenizer as fsq_tokenizer
+# import openpi.models.utils.fsq_tokenizer as fsq_tokenizer
 import openpi.shared.download as download
 
 
