@@ -196,6 +196,10 @@ def save_checkpoint(model, optimizer, global_step, config, is_main, data_config)
             shutil.rmtree(final_ckpt_dir)
         tmp_ckpt_dir.rename(final_ckpt_dir)
 
+        for d in config.checkpoint_dir.iterdir():
+            if d.is_dir() and d.name.isdigit() and int(d.name) != global_step:
+                shutil.rmtree(d)
+
         logging.info(f"Saved checkpoint at step {global_step} -> {final_ckpt_dir}")
 
         # Log checkpoint to wandb

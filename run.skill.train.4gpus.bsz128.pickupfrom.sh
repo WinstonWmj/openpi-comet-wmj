@@ -20,7 +20,7 @@ exp_name=pi05_b1k-pickupfrom-lr2.5e-step20k
 # 注意：`data.base_config` 在 `DataConfigFactory` 里被 tyro Suppress，不支持用命令行覆盖 `--data.base_config.*`
 CMD="python scripts/train.py ${config_name} --exp_name=${exp_name} --overwrite \
   --weight_loader.params_path=/mnt/project_rlinf/tgy/model/openpi_comet/pi05-b1kpt50-cs32/params \
-  --batch_size=256 \
+  --batch_size=128 \
   --save_interval 5000 \
   --log_interval 10"
 

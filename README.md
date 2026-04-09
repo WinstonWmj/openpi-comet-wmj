@@ -103,9 +103,9 @@ GIT_LFS_SKIP_SMUDGE=1 uv pip install -e .
 source .venv/bin/activate
 
 # Install behavior for server deploy 
-cd $PATH_TO_BEHAVIOR_1K
-uv pip install -e bddl
-uv pip install -e "OmniGibson[eval]"
+# cd $PATH_TO_BEHAVIOR_1K
+uv pip install -e "/mnt/project_rlinf/mjwei/repo/BEHAVIOR-1K/bddl"
+uv pip install -e "/mnt/project_rlinf/mjwei/repo/BEHAVIOR-1K/OmniGibson[eval]"
 ```
 
 ## Model Zoo
