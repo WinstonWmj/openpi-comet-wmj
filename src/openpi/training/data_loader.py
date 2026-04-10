@@ -166,6 +166,17 @@ def create_multi_behavior_dataset(
     return MultiBehaviorLeRobotDataset(datasets, sample_weights=sample_weights)
 
 
+def select_multi_behavior_data_config(data_configs: list[_config.DataConfig]) -> _config.DataConfig:
+    data_config = data_configs[0]
+    asset_ids = {config.asset_id for config in data_configs}
+    if len(asset_ids) > 1:
+        logging.warning(
+            "Multi-dataset training is applying transforms and normalization stats from the first dataset only. "
+            "Set a shared assets.asset_id across datasets if you want to precompute and load joint norm stats."
+        )
+    return data_config
+
+
 def transform_dataset(dataset: Dataset, data_config: _config.DataConfig, *, skip_norm_stats: bool = False) -> Dataset:
     """Transform the dataset by applying the data transforms."""
     norm_stats = {}
@@ -233,7 +244,7 @@ def create_behavior_data_loader(
             sample_weights=config.sample_weights,
             action_horizon=config.model.action_horizon,
         )
-        data_config = data_configs[0]
+        data_config = select_multi_behavior_data_config(data_configs)
     else:
         data_config = config.data.create(config.assets_dirs, config.model)
         dataset = create_behavior_dataset(data_config, action_horizon=config.model.action_horizon)
@@ -282,7 +293,7 @@ def create_torch_behavior_data_loader(
             sample_weights=config.sample_weights,
             action_horizon=config.model.action_horizon,
         )
-        data_config = data_configs[0]
+        data_config = select_multi_behavior_data_config(data_configs)
     else:
         data_config = config.data.create(config.assets_dirs, config.model)
         dataset = create_behavior_dataset(data_config, action_horizon=config.model.action_horizon)
