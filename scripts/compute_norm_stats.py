@@ -5,22 +5,55 @@ will compute the mean and standard deviation of the data in the dataset and save
 to the configured assets directory.
 """
 
+import dataclasses
 import pathlib
 
 import numpy as np
+import torch
 import tqdm
 import tyro
 
+
+def _disable_torch_compile_for_norm_stats() -> None:
+    """Avoid import-time torch.compile overhead for one-off stat jobs."""
+
+    def _identity_compile(fn=None, *args, **kwargs):
+        if fn is None:
+            return lambda wrapped: wrapped
+        return fn
+
+    torch.compile = _identity_compile
+
+
+_disable_torch_compile_for_norm_stats()
+
 import openpi.models.model as _model
+from openpi.policies.b1k_policy import extract_state_from_proprio
 import openpi.shared.normalize as normalize
 import openpi.training.config as _config
 import openpi.training.data_loader as _data_loader
 import openpi.transforms as transforms
 
-
 class RemoveStrings(transforms.DataTransformFn):
     def __call__(self, x: dict) -> dict:
         return {k: v for k, v in x.items() if not np.issubdtype(np.asarray(v).dtype, np.str_)}
+
+
+@dataclasses.dataclass(frozen=True)
+class ExtractBehaviorStateActions(transforms.DataTransformFn):
+    """Extract only state/actions for behavior norm stats.
+
+    This avoids running image-heavy policy transforms during norm computation.
+    """
+
+    action_dim: int
+    action_key: str
+
+    def __call__(self, x: dict) -> dict:
+        return {
+            "state": transforms.pad_to_dim(extract_state_from_proprio(np.asarray(x["observation.state"])), self.action_dim),
+            "actions": transforms.pad_to_dim(np.asarray(x[self.action_key]), self.action_dim),
+        }
 
 
 def _get_data_factories(config: _config.TrainConfig) -> list[_config.DataConfigFactory]:
@@ -88,6 +121,7 @@ def create_torch_dataloader(
         num_workers=num_workers,
         shuffle=shuffle,
         num_batches=num_batches,
+        framework="pytorch",
     )
     return data_loader, num_batches
 
@@ -128,11 +162,17 @@ def create_behavior_dataloader(
     num_workers: int,
     max_frames: int | None = None,
 ) -> tuple[_data_loader.Dataset, int]:
+    # The lightweight norm path no longer decodes video, so worker startup/pickling
+    # is typically more expensive than iterating in-process.
+    behavior_num_workers = 0
+    lightweight_configs = [
+        dataclasses.replace(data_config, modalities=[], return_seg_instance=False) for data_config in data_configs
+    ]
     if len(data_configs) == 1:
-        dataset = _data_loader.create_behavior_dataset(data_configs[0], config.model.action_horizon)
+        dataset = _data_loader.create_behavior_dataset(lightweight_configs[0], config.model.action_horizon)
     else:
         dataset = _data_loader.create_multi_behavior_dataset(
-            data_configs,
+            lightweight_configs,
             sample_weights=config.sample_weights,
             action_horizon=config.model.action_horizon,
         )
@@ -140,8 +180,10 @@ def create_behavior_dataloader(
     dataset = _data_loader.TransformedDataset(
         dataset,
         [
-            *data_configs[0].repack_transforms.inputs,
-            *data_configs[0].data_transforms.inputs,
+            ExtractBehaviorStateActions(
+                action_dim=config.model.action_dim,
+                action_key=lightweight_configs[0].action_sequence_keys[0],
+            ),
             RemoveStrings(),
         ],
     )
@@ -156,9 +198,10 @@ def create_behavior_dataloader(
     data_loader = _data_loader.TorchDataLoader(
         dataset,
         local_batch_size=batch_size,
-        num_workers=num_workers,
+        num_workers=behavior_num_workers,
         shuffle=shuffle,
         num_batches=num_batches,
+        framework="pytorch",
     )
     return data_loader, num_batches
 
@@ -191,8 +234,6 @@ def main(config_name: str, max_frames: int | None = None):
         norm_stats = {key: stats.get_statistics() for key, stats in stats.items()}
     elif data_config.behavior_dataset_root:
         from omnigibson.learning.datas import BehaviorLerobotDatasetMetadata
-
-        from openpi.policies.b1k_policy import extract_state_from_proprio
 
         metadata = BehaviorLerobotDatasetMetadata(
             repo_id=data_config.repo_id,

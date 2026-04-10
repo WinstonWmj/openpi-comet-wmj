@@ -13,7 +13,7 @@ mkdir -p "$OPENPI_DATA_HOME" "$XDG_CACHE_HOME" "$HF_HOME" "$TMPDIR" "$JAX_COMPIL
 config_name=pi05_b1k-pickupfrom-lr2.5e-6_step20k_rft_demo-norm-postrain
 exp_name=pi05_b1k-pickupfrom-lr2.5e-6_step20k_rft_demo-norm-postrain
 
-python scripts/compute_norm_stats.py --config-name ${config_name}
+# python scripts/compute_norm_stats.py --config-name ${config_name}
 
 # 单卡 batch=16 时按线性缩放 lr：原 5e-6 * (16/256) ≈ 3e-7
 # 或 平方根缩放：new_lr = old_lr × sqrt(new_batch / old_batch)

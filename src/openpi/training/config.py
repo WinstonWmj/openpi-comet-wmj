@@ -865,11 +865,11 @@ _CONFIGS = [
                 repo_id="behavior-1k/2025-challenge-demos",
                 assets=AssetsConfig(
                     assets_dir="/mnt/project_rlinf/tgy/model/openpi_comet/pi05-b1kpt50-cs32/assets",
-                    asset_id="joint/behavior-1k-comet-1.5k",
+                    # asset_id="joint/behavior-1k-comet-1.5k",
                 ),
                 base_config=DataConfig(
                     prompt_from_task=True,
-                    episodes_index=list(range(1)),
+                    episodes_index=list(range(30)),
                     behavior_dataset_root="/mnt/project_rlinf_hs/mjwei/download_models/2025-challenge-demos/",
                     fine_grained_level=2,  # 0: global instruction, 1: skill name, 2: subtask description
                     skill_list=["pick up from:1.0"],
@@ -877,10 +877,10 @@ _CONFIGS = [
             ),
             LeRobotB1KDataConfig(
                 repo_id="delinqu/comet-1.5k",
-                assets=AssetsConfig(
-                    assets_dir="/mnt/project_rlinf/tgy/model/openpi_comet/pi05-b1kpt50-cs32/assets",
-                    asset_id="joint/behavior-1k-comet-1.5k",
-                ),
+                # assets=AssetsConfig(
+                #     assets_dir="/mnt/project_rlinf/tgy/model/openpi_comet/pi05-b1kpt50-cs32/assets",
+                #     asset_id="joint/behavior-1k-comet-1.5k",
+                # ),
                 base_config=DataConfig(
                     prompt_from_task=True,
                     behavior_dataset_root="/mnt/project_rlinf_hs/mjwei/download_models/delinqu/comet-1.5k/",

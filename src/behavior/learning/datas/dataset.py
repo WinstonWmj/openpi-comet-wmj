@@ -234,6 +234,16 @@ class BehaviorLeRobotDataset(LeRobotDataset):
             self.delta_indices = get_delta_indices(self.delta_timestamps, self.fps)
 
         self.prepare_task(fine_grained_level)
+        self._active_chunks = None
+        if self._chunk_streaming_using_keyframe:
+            skill_filtered_chunks = self._get_skill_filtered_chunk_indices()
+            if skill_filtered_chunks is not None:
+                self.chunks = skill_filtered_chunks
+                if len(self.chunks) == 0:
+                    raise ValueError(f"No frames matched skill filter {self.skill_list} for dataset {self.repo_id}.")
+                if self.current_streaming_chunk_idx is not None:
+                    self.current_streaming_chunk_idx = 0
+                    self.current_streaming_frame_idx = self.chunks[0][0]
 
         self.omnigibson_mapping = {ep_idx: defaultdict(dict) for ep_idx in self.episodes}
 
@@ -250,6 +260,57 @@ class BehaviorLeRobotDataset(LeRobotDataset):
             print(f"[warn] {self.repo_id} failed to calculate episode subtask cumulate: {e}")
 
         print(f"prepare task with fine_grained_level {self.fine_grained_level} for {self.root}")
+
+    def _has_deterministic_skill_filter(self) -> bool:
+        if self.skill_list is None:
+            return False
+        filtered_skills = [skill_item for skill_item in self.skill_list if skill_item != "all"]
+        if not filtered_skills:
+            return False
+        try:
+            return all(float(skill_item.split(":")[1]) in (0.0, 1.0) for skill_item in filtered_skills)
+        except (IndexError, ValueError):
+            return False
+
+    def _get_skill_filtered_chunk_indices(self, chunk_size=250) -> list[tuple[int, int, int]] | None:
+        if not self._has_deterministic_skill_filter():
+            return None
+
+        filtered_chunks = []
+        for ep_idx in self.episodes:
+            if ep_idx not in self.task_sizes or ep_idx not in self.meta.orchestrators:
+                return None
+
+            ep_pos = self.episode_data_index_pos[ep_idx]
+            ep_start = int(self.episode_data_index["from"][ep_pos].item())
+            ep_end = int(self.episode_data_index["to"][ep_pos].item())
+            episode_len = ep_end - ep_start
+
+            local_start = 0
+            for sub_idx, local_end_inclusive in enumerate(self.task_sizes[ep_idx]):
+                local_end = min(int(local_end_inclusive) + 1, episode_len)
+                if local_end <= local_start:
+                    continue
+
+                task_skill = self.meta.orchestrators[ep_idx][1][sub_idx]["task"]
+                weight = skill_weight(task_skill, self.skill_list)
+                if weight not in (0.0, 1.0):
+                    return None
+
+                if weight == 1.0:
+                    for chunk_local_start in range(local_start, local_end, chunk_size):
+                        chunk_local_end = min(chunk_local_start + chunk_size, local_end)
+                        filtered_chunks.append(
+                            (
+                                ep_start + chunk_local_start,
+                                ep_start + chunk_local_end,
+                                chunk_local_start,
+                            )
+                        )
+
+                local_start = local_end
+
+        return filtered_chunks
 
     def get_episodes_file_paths(self) -> list[str]:
         """
