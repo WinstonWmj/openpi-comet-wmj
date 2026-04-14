@@ -907,6 +907,44 @@ _CONFIGS = [
         num_workers=8,
         batch_size=4 * 32,
     ),
+    # 3.3 RFT Configs based in postrain checkpoint only pickupfrom
+    TrainConfig(
+        name="pi05_b1k-pickupfrom-lr2.5e-6_step20k_rft-norm-postrain",
+        exp_name="openpi",
+        project_name="B1K",
+        model=pi0_config.Pi0Config(pi05=True, action_horizon=32),
+        data=LeRobotB1KDataConfig(
+                repo_id="delinqu/comet-1.5k",
+                # assets=AssetsConfig(
+                #     assets_dir="/mnt/project_rlinf_hs/mjwei/download_models/behavior-1k/skill-comet",
+                #     asset_id="behavior-1k/2025-challenge-demos",
+                # ),
+                base_config=DataConfig(
+                    prompt_from_task=True,
+                    # episodes_index=list(range(1)),
+                    behavior_dataset_root="/mnt/project_rlinf_hs/mjwei/download_models/delinqu/comet-1.5k/",
+                    fine_grained_level=2,  # 0: global instruction, 1: skill name, 2: subtask description
+                    skill_list=["pick up from:1.0"],
+                ),
+            ),
+        weight_loader=weight_loaders.CheckpointWeightLoader(
+            "/mnt/project_rlinf/tgy/model/openpi_comet/pi05-b1kpt50-cs32/params"
+        ),        
+        num_train_steps=20_000,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            peak_lr=2.5e-6,
+            decay_steps=20_000,
+        ),
+        freeze_filter=pi0_config.Pi0Config(pi05=True, action_horizon=32).get_freeze_filter(),
+        ema_decay=None,
+        num_workers=8,
+        batch_size=8 * 32,
+        assets_base_dir="/mnt/project_rlinf/tgy/model/openpi_comet/pi05-b1kpt50-cs32/assets",
+        checkpoint_base_dir="/mnt/project_rlinf_hs/mjwei/download_models/behavior-1k/skill-comet",
+        log_interval=10,
+        save_interval=5000,
+        keep_period=5000,
+    ),
     # now is the config for skill training
     TrainConfig(
         name="pi05_b1k-pickupfrom-lr2.5e-step20k-200",
@@ -977,6 +1015,80 @@ _CONFIGS = [
         checkpoint_base_dir="/mnt/project_rlinf_hs/mjwei/download_models/behavior-1k/skill-comet",
         log_interval=10,
         save_interval=5000,
+        keep_period=5000,
+        num_workers=8,
+        batch_size=4 * 32,
+    ),
+    # now is the config for skill training: pickplace
+    TrainConfig(
+        name="pi05_b1k-pickplace-lr2.5e-step20k-200",
+        exp_name="openpi",
+        project_name="B1K",
+        model=pi0_config.Pi0Config(pi05=True, action_horizon=32),
+        data=LeRobotB1KDataConfig(
+            repo_id="behavior-1k/2025-challenge-demos/",
+            assets=AssetsConfig(
+                assets_dir="/mnt/project_rlinf/tgy/model/openpi_comet/pi05-b1kpt50-cs32/assets",
+            ),
+            base_config=DataConfig(
+                prompt_from_task=True,
+                episodes_index=list(range(200)),
+                behavior_dataset_root="/mnt/project_rlinf_hs/mjwei/download_models/2025-challenge-demos/",
+                fine_grained_level=2,  # 0: global instruction, 1: skill name, 2: subtask description
+                skill_list=["pick up from:1.0", "place in:1.0", "place on:1.0", "insert:1.0"],
+            ),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader(
+            "/mnt/project_rlinf/tgy/model/openpi_comet/pi05-b1kpt50-cs32/params"
+        ),
+        num_train_steps=20_000,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            peak_lr=2.5e-6,
+            decay_steps=20_000,
+        ),
+        freeze_filter=pi0_config.Pi0Config(pi05=True, action_horizon=32).get_freeze_filter(),
+        ema_decay=None,
+        assets_base_dir="/mnt/project_rlinf/tgy/model/openpi_comet/pi05-b1kpt50-cs32/assets",
+        checkpoint_base_dir="/mnt/project_rlinf_hs/mjwei/download_models/behavior-1k/skill-comet",
+        log_interval=10,
+        save_interval=1000,
+        keep_period=5000,
+        num_workers=8,
+        batch_size=4 * 32,
+    ),
+    # now is the config for skill training: placeinplaceon
+    TrainConfig(
+        name="pi05_b1k-placeinplaceon-lr2.5e-step20k-200",
+        exp_name="openpi",
+        project_name="B1K",
+        model=pi0_config.Pi0Config(pi05=True, action_horizon=32),
+        data=LeRobotB1KDataConfig(
+            repo_id="behavior-1k/2025-challenge-demos/",
+            assets=AssetsConfig(
+                assets_dir="/mnt/project_rlinf/tgy/model/openpi_comet/pi05-b1kpt50-cs32/assets",
+            ),
+            base_config=DataConfig(
+                prompt_from_task=True,
+                episodes_index=list(range(200)),
+                behavior_dataset_root="/mnt/project_rlinf_hs/mjwei/download_models/2025-challenge-demos/",
+                fine_grained_level=2,  # 0: global instruction, 1: skill name, 2: subtask description
+                skill_list=["place in:1.0", "place on:1.0", "insert:1.0"],
+            ),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader(
+            "/mnt/project_rlinf/tgy/model/openpi_comet/pi05-b1kpt50-cs32/params"
+        ),
+        num_train_steps=20_000,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            peak_lr=2.5e-6,
+            decay_steps=20_000,
+        ),
+        freeze_filter=pi0_config.Pi0Config(pi05=True, action_horizon=32).get_freeze_filter(),
+        ema_decay=None,
+        assets_base_dir="/mnt/project_rlinf/tgy/model/openpi_comet/pi05-b1kpt50-cs32/assets",
+        checkpoint_base_dir="/mnt/project_rlinf_hs/mjwei/download_models/behavior-1k/skill-comet",
+        log_interval=10,
+        save_interval=1000,
         keep_period=5000,
         num_workers=8,
         batch_size=4 * 32,
