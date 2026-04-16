@@ -86,6 +86,15 @@ class B1KPolicyWrapper:
         if self.reasoner:
             self.reasoner.reset()
 
+    @property
+    def needs_observation(self) -> bool:
+        """
+        Return whether the next action request needs a fresh observation payload.
+        """
+        if self.control_mode == "receeding_horizon":
+            return len(self.action_queue) == 0
+        return True
+
     def process_obs(self, obs: dict) -> dict:
         """
         Process the observation dictionary to match the expected input format for the model.
@@ -242,15 +251,15 @@ class B1KPolicyWrapper:
             Dtype: float64
             Shape: (10, 16)
         """
+        if self.control_mode == "receeding_horizon":
+            if len(self.action_queue) > 0:
+                # Return cached chunk actions without touching observation processing.
+                final_action = self.action_queue.popleft()[None]
+                return torch.from_numpy(final_action)
+
         input_obs = self.process_obs(input_obs)
         if self.control_mode == "receeding_temporal":
             return self.act_receeding_temporal(input_obs)
-
-        if self.control_mode == "receeding_horizon":
-            if len(self.action_queue) > 0:
-                # pop the first action in the queue
-                final_action = self.action_queue.popleft()[None]
-                return torch.from_numpy(final_action)
 
         nbatch = copy.deepcopy(input_obs)
         if nbatch["observation"].shape[-1] != 3:

@@ -786,7 +786,7 @@ _CONFIGS = [
                 prompt_from_task=True,
                 behavior_dataset_root="../DATASETS/behavior/2025-challenge-demos-rft",
                 tasks=["freeze_pies"],
-                fine_grained_level=0,  # 0, 1, 2
+                fine_grained_level=2,  # 0: global instruction, 1: skill name, 2: subtask description
             ),
         ),
         weight_loader=weight_loaders.CheckpointWeightLoader("path_to_your_pretrained_checkpoint"),
