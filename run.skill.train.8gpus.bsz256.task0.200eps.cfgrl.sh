@@ -10,18 +10,18 @@ export JAX_COMPILATION_CACHE_DIR="/mnt/project_rlinf_hs/mjwei/repo/openpi-comet/
 # export OMNIGIBSON_DATA_PATH="/mnt/project_rlinf/mjwei/repo/BEHAVIOR-1K/datasets"
 mkdir -p "$OPENPI_DATA_HOME" "$XDG_CACHE_HOME" "$HF_HOME" "$TMPDIR" "$JAX_COMPILATION_CACHE_DIR"
 
-config_name=pi05_b1k-pickupfrom-lr2.5e-step20k-200
-exp_name=pi05_b1k-pickupfrom-lr2.5e-step20k-200
+config_name=pi05_b1k-turning_on_radio_cfgrl_lr2.5e-6_step20k
+exp_name=pi05_b1k-turning_on_radio_cfgrl_lr2.5e-6_step20k
 
-# python scripts/compute_norm_stats.py --config-name ${config_name}
+python scripts/compute_norm_stats.py --config-name ${config_name}
 
 # 单卡 batch=16 时按线性缩放 lr：原 5e-6 * (16/256) ≈ 3e-7
 # 或 平方根缩放：new_lr = old_lr × sqrt(new_batch / old_batch)
 # 注意：`data.base_config` 在 `DataConfigFactory` 里被 tyro Suppress，不支持用命令行覆盖 `--data.base_config.*`
 CMD="python scripts/train.py ${config_name} --exp_name=${exp_name} --overwrite \
   --weight_loader.params_path=/mnt/project_rlinf/tgy/model/openpi_comet/pi05-b1kpt50-cs32/params \
-  --batch_size=128 \
-  --save_interval 10 \
+  --batch_size=256 \
+  --save_interval 5000 \
   --log_interval 10 \
   --num_workers 32"
 

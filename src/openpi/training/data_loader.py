@@ -152,7 +152,15 @@ def create_behavior_dataset(data_config: _config.DataConfig, action_horizon: int
     )
 
     # fixed prompt hard coding
-    dataset = TransformedDataset(dataset, [_transforms.PromptFromLeRobotItem()])
+    prompt_transforms = [_transforms.PromptFromLeRobotItem()]
+    if data_config.cfgrl_optimality_label is not None:
+        prompt_transforms.append(
+            _transforms.CFGRLOptimalityPrompt(
+                label=data_config.cfgrl_optimality_label,
+                dropout_prob=data_config.cfgrl_condition_dropout,
+            )
+        )
+    dataset = TransformedDataset(dataset, prompt_transforms)
 
     return dataset
 

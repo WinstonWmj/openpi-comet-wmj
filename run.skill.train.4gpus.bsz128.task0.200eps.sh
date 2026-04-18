@@ -1,5 +1,5 @@
 # 单卡训练环境
-export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
+export CUDA_VISIBLE_DEVICES=0,1,2,3
 
 # 设置缓存和临时目录以避免空间不足问题（根分区只有100G，必须重定向到NFS大盘）
 export OPENPI_DATA_HOME="/mnt/project_rlinf_hs/mjwei/repo/openpi-comet/cache/openpi"
@@ -10,8 +10,8 @@ export JAX_COMPILATION_CACHE_DIR="/mnt/project_rlinf_hs/mjwei/repo/openpi-comet/
 # export OMNIGIBSON_DATA_PATH="/mnt/project_rlinf/mjwei/repo/BEHAVIOR-1K/datasets"
 mkdir -p "$OPENPI_DATA_HOME" "$XDG_CACHE_HOME" "$HF_HOME" "$TMPDIR" "$JAX_COMPILATION_CACHE_DIR"
 
-config_name=pi05_b1k-pickupfrom-lr2.5e-step20k-200
-exp_name=pi05_b1k-pickupfrom-lr2.5e-step20k-200
+config_name=pi05_b1k-turning_on_radio_lr2.5e-6_step20k_sft
+exp_name=pi05_b1k-turning_on_radio_lr2.5e-6_step20k_sft
 
 # python scripts/compute_norm_stats.py --config-name ${config_name}
 
@@ -21,7 +21,7 @@ exp_name=pi05_b1k-pickupfrom-lr2.5e-step20k-200
 CMD="python scripts/train.py ${config_name} --exp_name=${exp_name} --overwrite \
   --weight_loader.params_path=/mnt/project_rlinf/tgy/model/openpi_comet/pi05-b1kpt50-cs32/params \
   --batch_size=128 \
-  --save_interval 10 \
+  --save_interval 5000 \
   --log_interval 10 \
   --num_workers 32"
 

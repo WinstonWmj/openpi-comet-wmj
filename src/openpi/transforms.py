@@ -392,6 +392,41 @@ class PromptFromLeRobotItem(DataTransformFn):
 
 
 @dataclasses.dataclass(frozen=True)
+class CFGRLOptimalityPrompt(DataTransformFn):
+    """Appends an optimality condition to the language prompt for CFGRL training."""
+
+    label: int | None = None
+    dropout_prob: float = 0.1
+    label_key: str = "optimality"
+    positive_text: str = "optimal"
+    negative_text: str = "suboptimal"
+    null_text: str = "unspecified"
+
+    def __call__(self, data: DataDict) -> DataDict:
+        prompt = data.get("prompt")
+        if prompt is None:
+            raise ValueError("CFGRLOptimalityPrompt requires a prompt")
+
+        if not isinstance(prompt, str):
+            prompt = prompt.item()
+
+        label = self.label
+        if label is None and self.label_key in data:
+            label = int(np.asarray(data[self.label_key]).item())
+
+        if label is None:
+            return data
+
+        if self.dropout_prob > 0.0 and np.random.random() < self.dropout_prob:
+            optimality_text = self.null_text
+        else:
+            optimality_text = self.positive_text if int(label) == 1 else self.negative_text
+
+        data["prompt"] = np.asarray(f"{prompt} Optimality: {optimality_text}.")
+        return data
+
+
+@dataclasses.dataclass(frozen=True)
 class PadStatesAndActions(DataTransformFn):
     """Zero-pads states and actions to the model action dimension."""
 

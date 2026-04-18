@@ -133,6 +133,11 @@ class DataConfig:
     # skill list to use for training
     skill_list: list[str] = dataclasses.field(default_factory=lambda: ["all"])
 
+    # CFGRL optimality conditioning. Set to 1 for optimal demos, 0 for rollback / suboptimal demos.
+    # When not None, this label is appended to the prompt and randomly dropped with cfgrl_condition_dropout.
+    cfgrl_optimality_label: int | None = None
+    cfgrl_condition_dropout: float = 0.0
+
 
 class GroupFactory(Protocol):
     def __call__(self, model_config: _model.BaseModelConfig) -> _transforms.Group:
@@ -754,15 +759,19 @@ _CONFIGS = [
         model=pi0_config.Pi0Config(pi05=True, action_horizon=32),
         data=LeRobotB1KDataConfig(
             repo_id="behavior-1k/2025-challenge-demos",
+            assets=AssetsConfig(
+                assets_dir="/mnt/project_rlinf/tgy/model/openpi_comet/pi05-b1kpt50-cs32/assets",
+            ),
             base_config=DataConfig(
                 prompt_from_task=True,
-                behavior_dataset_root="../DATASETS/behavior/2025-challenge-demos",
+                episodes_index=list(range(200)),
+                behavior_dataset_root="/mnt/project_rlinf_hs/mjwei/download_models/2025-challenge-demos/",
                 tasks=["turning_on_radio"],
                 fine_grained_level=0,  # 0, 1, 2
             ),
         ),
         weight_loader=weight_loaders.CheckpointWeightLoader(
-            "sunshk/openpi_comet/pi05-b1kpt50-cs32"
+            "/mnt/project_rlinf/tgy/model/openpi_comet/pi05-b1kpt50-cs32/params"
         ),  # hf download in advance
         num_train_steps=20_000,
         lr_schedule=_optimizer.CosineDecaySchedule(
@@ -771,8 +780,107 @@ _CONFIGS = [
         ),
         freeze_filter=pi0_config.Pi0Config(pi05=True, action_horizon=32).get_freeze_filter(),
         ema_decay=None,
-        checkpoint_base_dir=".",
+        assets_base_dir="/mnt/project_rlinf/tgy/model/openpi_comet/pi05-b1kpt50-cs32/assets",
+        checkpoint_base_dir="/mnt/project_rlinf_hs/mjwei/download_models/behavior-1k/skill-comet",
         save_interval=1000,
+        keep_period=5000,
+        num_workers=8,
+        batch_size=8 * 32,
+    ),
+    # 2.1 CFGRL Configs
+    TrainConfig(
+        name="pi05_b1k-turning_on_radio_cfgrl_lr2.5e-6_step20k",
+        exp_name="openpi",
+        project_name="B1K",
+        model=pi0_config.Pi0Config(pi05=True, action_horizon=32),
+        data=[
+            LeRobotB1KDataConfig(
+                repo_id="behavior-1k/2025-challenge-demos",
+                base_config=DataConfig(
+                    prompt_from_task=True,
+                    behavior_dataset_root="/mnt/project_rlinf_hs/mjwei/download_models/2025-challenge-demos",
+                    tasks=["turning_on_radio"],
+                    fine_grained_level=0,
+                    cfgrl_optimality_label=1,
+                    cfgrl_condition_dropout=0.1,
+                ),
+            ),
+            LeRobotB1KDataConfig(
+                repo_id="behavior-1k/cfgrl-rollback-replay",
+                base_config=DataConfig(
+                    prompt_from_task=True,
+                    behavior_dataset_root="/mnt/project_rlinf_hs/mjwei/download_models/behavior-1k/cfgrl-rollback-replay",
+                    tasks=["turning_on_radio"],
+                    fine_grained_level=0,
+                    cfgrl_optimality_label=0,
+                    cfgrl_condition_dropout=0.1,
+                ),
+            ),
+        ],
+        sample_weights=[0.5, 0.5],
+        weight_loader=weight_loaders.CheckpointWeightLoader(
+            "/mnt/project_rlinf_hs/mjwei/download_models/sunshk/comet_submission/pi05-pt50-pretrain-50k/params"
+        ),
+        num_train_steps=20_000,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            peak_lr=2.5e-6,
+            decay_steps=20_000,
+        ),
+        freeze_filter=pi0_config.Pi0Config(pi05=True, action_horizon=32).get_freeze_filter(),
+        ema_decay=None,
+        assets_base_dir="/mnt/project_rlinf_hs/mjwei/download_models/sunshk/comet_submission/pi05-pt50-pretrain-50k/assets",
+        checkpoint_base_dir="/mnt/project_rlinf_hs/mjwei/download_models/behavior-1k/cfgrl-comet/task00",
+        log_interval=10,
+        save_interval=5000,
+        keep_period=5000,
+        num_workers=8,
+        batch_size=8 * 32,
+    ),
+
+    TrainConfig(
+        name="pi05_b1k-turning_on_radio_cfgrl_lr2.5e-6_step20k-rft",
+        exp_name="openpi",
+        project_name="B1K",
+        model=pi0_config.Pi0Config(pi05=True, action_horizon=32),
+        data=[
+            LeRobotB1KDataConfig(
+                repo_id="delinqu/comet-1.5k",
+                base_config=DataConfig(
+                    prompt_from_task=True,
+                    behavior_dataset_root="/mnt/project_rlinf_hs/mjwei/download_models/delinqu/comet-1.5k/",
+                    tasks=["turning_on_radio"],
+                    fine_grained_level=0,  # 0: global instruction, 1: skill name, 2: subtask description
+                    cfgrl_optimality_label=1,
+                    cfgrl_condition_dropout=0.1,
+                ),
+            ),
+            LeRobotB1KDataConfig(
+                repo_id="behavior-1k/cfgrl-rollback-replay",
+                base_config=DataConfig(
+                    prompt_from_task=True,
+                    behavior_dataset_root="/mnt/project_rlinf_hs/mjwei/download_models/behavior-1k/cfgrl-rollback-replay",
+                    tasks=["turning_on_radio"],
+                    fine_grained_level=0,  # 0: global instruction, 1: skill name, 2: subtask description
+                    cfgrl_optimality_label=0,
+                    cfgrl_condition_dropout=0.1,
+                ),
+            ),
+        ],
+        sample_weights=[0.5, 0.5],
+        weight_loader=weight_loaders.CheckpointWeightLoader(
+            "/mnt/project_rlinf_hs/mjwei/download_models/sunshk/comet_submission/pi05-pt50-pretrain-50k/params"
+        ),
+        num_train_steps=20_000,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            peak_lr=2.5e-6,
+            decay_steps=20_000,
+        ),
+        freeze_filter=pi0_config.Pi0Config(pi05=True, action_horizon=32).get_freeze_filter(),
+        ema_decay=None,
+        assets_base_dir="/mnt/project_rlinf_hs/mjwei/download_models/sunshk/comet_submission/pi05-pt50-pretrain-50k/assets",
+        checkpoint_base_dir="/mnt/project_rlinf_hs/mjwei/download_models/behavior-1k/cfgrl-comet/task00",
+        log_interval=10,
+        save_interval=5000,
         keep_period=5000,
         num_workers=8,
         batch_size=8 * 32,
