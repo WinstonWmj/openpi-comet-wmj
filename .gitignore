@@ -172,4 +172,12 @@ experiments/
 
 outputs
 
-log
+log.venv/
+wandb/
+logs/
+openpi-move-to-mix-skills-pt/
+tmp/
+tmp*/
+torchinductor_root/
+error-archive/
+*.log

@@ -477,6 +477,14 @@ class DataLoaderImpl(DataLoader):
     def data_config(self) -> _config.DataConfig:
         return self._data_config
 
+    def __len__(self) -> int:
+        return len(self._data_loader.torch_loader)
+
+    def set_epoch(self, epoch: int) -> None:
+        sampler = self._data_loader.torch_loader.sampler
+        if sampler is not None and hasattr(sampler, "set_epoch"):
+            sampler.set_epoch(epoch)
+
     def __iter__(self):
         for batch in self._data_loader:
             yield _model.Observation.from_dict(batch), batch["actions"]

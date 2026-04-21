@@ -292,7 +292,8 @@ class BehaviorLeRobotDataset(LeRobotDataset):
                 if local_end <= local_start:
                     continue
 
-                task_skill = self.meta.orchestrators[ep_idx][1][sub_idx]["task"]
+                orch = self.meta.orchestrators[ep_idx][1][sub_idx]
+                task_skill = orch.get("skill", orch["task"])
                 weight = skill_weight(task_skill, self.skill_list)
                 if weight not in (0.0, 1.0):
                     return None
@@ -529,7 +530,8 @@ class BehaviorLeRobotDataset(LeRobotDataset):
         ep_idx = item["episode_index"].item()
         frame_index = round(item["timestamp"].item() * self.fps)
         sub_idx = bisect.bisect_right(self.task_sizes[ep_idx], frame_index, hi=len(self.task_sizes[ep_idx]) - 1)
-        task_skill = self.meta.orchestrators[ep_idx][1][sub_idx]["task"]
+        orch = self.meta.orchestrators[ep_idx][1][sub_idx]
+        task_skill = orch.get("skill", orch["task"])
         return task_skill
 
     def _get_fine_grained_task(self, item: dict) -> str:
@@ -720,6 +722,8 @@ class BehaviorLerobotDatasetMetadata(LeRobotDatasetMetadata):
                             for episode in sorted((orchestrators_path / f"task-{task:04d}").iterdir())
                         }
                     )
+        elif self.annotations:
+            orchestrators = build_orchestrators_from_annotations(self.annotations, self.episodes)
         return orchestrators
 
     def get_annotation_path(self, ep_index: int) -> Path:
@@ -816,6 +820,75 @@ def load_orchestrators_data(episode_path_or_level_0_task, episode_len):
         for i in range(len(output_data)):
             output_data[i] = output_data[0]
     return output_data
+
+
+def _annotation_object_to_text(object_id: str) -> str:
+    parts = str(object_id).split("_")
+    if len(parts) > 1 and parts[-1].isdigit():
+        parts = parts[:-1]
+    return " ".join(parts)
+
+
+def build_orchestrators_from_annotations(annotations: dict, episodes: dict) -> dict:
+    """Fallback for datasets that ship skill_annotation but no orchestrators/ directory.
+
+    Level 1 keeps the raw skill name for filtering (e.g. ``move to``).
+    Level 2 uses a lightweight prompt; for move-to data we expand it to
+    ``move to <object>`` so fine_grained_level=2 remains useful.
+    """
+    orchestrators = {}
+    for ep_idx, episode_data in sorted(episodes.items()):
+        ann = annotations.get(ep_idx)
+        episode_len = episode_data["length"]
+        task_name = episode_data["tasks"][0]
+
+        if ann is None or "skill_annotation" not in ann or not ann["skill_annotation"]:
+            orchestrators[ep_idx] = {
+                i: [{"task": task_name, "start_frame": 0, "end_frame": episode_len - 1}]
+                for i in range(4)
+            }
+            continue
+
+        output_data = defaultdict(list)
+        output_data[0].append(
+            {
+                "task": task_name,
+                "start_frame": 0,
+                "end_frame": episode_len - 1,
+            }
+        )
+
+        for skill_ann in ann["skill_annotation"]:
+            skill_desc = (skill_ann.get("skill_description") or [""])[0]
+            frame_duration = skill_ann.get("frame_duration") or [0, episode_len]
+            start_frame = int(frame_duration[0] if isinstance(frame_duration[0], (int, float)) else frame_duration[0][0])
+            end_raw = frame_duration[1] if isinstance(frame_duration[1], (int, float)) else frame_duration[1][-1]
+            end_frame = int(end_raw) - 1
+
+            prompt = skill_desc
+            object_groups = skill_ann.get("object_id") or []
+            if skill_desc == "move to" and object_groups and object_groups[0]:
+                prompt = f"move to {_annotation_object_to_text(object_groups[0][0])}"
+
+            level1_segment = {
+                "task": skill_desc,
+                "skill": skill_desc,
+                "start_frame": start_frame,
+                "end_frame": end_frame,
+            }
+            level2_segment = {
+                "task": prompt,
+                "skill": skill_desc,
+                "start_frame": start_frame,
+                "end_frame": end_frame,
+            }
+            output_data[1].append(level1_segment)
+            output_data[2].append(level2_segment)
+            output_data[3].append(level2_segment.copy())
+
+        orchestrators[ep_idx] = dict(output_data)
+
+    return orchestrators
 
 
 def skill_weight(cur_skill, skill_list: list[str]) -> float:

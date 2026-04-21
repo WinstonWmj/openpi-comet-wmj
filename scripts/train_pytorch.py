@@ -22,11 +22,15 @@ Multi-Node Training:
     scripts/train_pytorch.py <config_name> --exp_name=<run_name> --save_interval <interval>
 
 """
+import os
+
+os.environ.setdefault("XLA_PYTHON_CLIENT_MEM_FRACTION", "0.9")
+# Must be set before CUDA allocator init (before ``import torch``).
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
 import dataclasses
 import gc
 import logging
-import os
 import platform
 import shutil
 import time
@@ -43,6 +47,7 @@ import wandb
 import openpi.models.pi0_config
 import openpi.models_pytorch.pi0_pytorch
 import openpi.shared.normalize as _normalize
+import openpi.training.cache_env as _cache_env
 import openpi.training.config as _config
 import openpi.training.data_loader as _data_loader
 
@@ -122,13 +127,14 @@ def set_seed(seed: int, local_rank: int):
         torch.cuda.manual_seed_all(seed + local_rank)
 
 
-def build_datasets(config: _config.TrainConfig):
+def build_datasets(config: _config.TrainConfig, *, loader_global_batch_size: int | None = None):
     # Use the unified data loader with PyTorch framework
     # data_loader = _data_loader.create_data_loader(config, framework="pytorch", shuffle=True)
+    batch_size = loader_global_batch_size if loader_global_batch_size is not None else config.batch_size
     data_loader = _data_loader.create_torch_behavior_data_loader(
         config,
         action_horizon=config.model.action_horizon,
-        batch_size=config.batch_size,
+        batch_size=batch_size,
         skip_norm_stats=False,
         shuffle=True,
         num_workers=config.num_workers,
@@ -360,16 +366,27 @@ def train_loop(config: _config.TrainConfig):
         init_wandb(config, resuming=resuming, enabled=config.wandb_enabled)
 
     # Build data loader using the unified data loader
-    # Calculate effective batch size per GPU for DDP
-    # For N GPUs, each GPU should get batch_size/N samples, so total across all GPUs is batch_size
     world_size = torch.distributed.get_world_size() if use_ddp else 1
-    effective_batch_size = config.batch_size // world_size
+    accum = max(1, int(config.pytorch_gradient_accumulation_steps))
+    if config.batch_size % accum != 0:
+        raise ValueError(
+            f"batch_size ({config.batch_size}) must be divisible by "
+            f"pytorch_gradient_accumulation_steps ({accum})"
+        )
+    micro_global_batch = config.batch_size // accum
+    if micro_global_batch % world_size != 0:
+        raise ValueError(
+            f"batch_size ({config.batch_size}) // accum ({accum}) = {micro_global_batch} must be divisible by "
+            f"world_size ({world_size})"
+        )
+    per_gpu_micro = micro_global_batch // world_size
     logging.info(
-        f"Using batch size per GPU: {effective_batch_size} (total batch size across {world_size} GPUs: {config.batch_size})"
+        f"Nominal global batch={config.batch_size} (same as JAX config); "
+        f"pytorch_gradient_accumulation_steps={accum}; "
+        f"per-forward global batch={micro_global_batch}; per-GPU micro-batch={per_gpu_micro}"
     )
 
-    # Pass the original batch size to data loader - it will handle DDP splitting internally
-    loader, data_config = build_datasets(config)
+    loader, data_config = build_datasets(config, loader_global_batch_size=micro_global_batch)
 
     # # Log sample images to wandb on first batch
     # if is_main and config.wandb_enabled and not resuming:
@@ -419,6 +436,13 @@ def train_loop(config: _config.TrainConfig):
         # Update dtype to match pytorch_training_precision
         object.__setattr__(model_cfg, "dtype", config.pytorch_training_precision)
 
+    # Backends before heavy GPU work (compile / first forward).
+    if world_size >= 8:
+        torch.backends.cudnn.benchmark = True
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
+        logging.info("Enabled cudnn benchmark + TF32 for 8+ GPU training")
+
     model = openpi.models_pytorch.pi0_pytorch.PI0Pytorch(model_cfg).to(device)
 
     if hasattr(model, "gradient_checkpointing_enable"):
@@ -433,22 +457,17 @@ def train_loop(config: _config.TrainConfig):
     if is_main and torch.cuda.is_available():
         log_memory_usage(device, 0, "after_model_creation")
 
-    # Enable memory optimizations for large-scale training
-    if world_size >= 8:
-        torch.backends.cudnn.benchmark = True
-        torch.backends.cuda.matmul.allow_tf32 = True
-        torch.backends.cudnn.allow_tf32 = True
-        # Set memory allocation configuration
-        os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "max_split_size_mb:128,expandable_segments:True"
-        logging.info("Enabled memory optimizations for 8+ GPU training")
-
     if use_ddp:
+        # This training path can leave a small, stable subset of parameters unused
+        # (e.g. branch-specific modules under PI05 / checkpointed forward), which
+        # triggers "Expected to have finished reduction..." on the next iteration
+        # when DDP assumes every parameter must receive gradients.
         model = torch.nn.parallel.DistributedDataParallel(
             model,
             device_ids=[device.index] if device.type == "cuda" else None,
-            find_unused_parameters=True,  # Disable for memory efficiency
-            gradient_as_bucket_view=True,  # Enable for memory efficiency
-            static_graph=world_size >= 8,  # Enable for 8+ GPUs
+            find_unused_parameters=True,
+            gradient_as_bucket_view=True,
+            static_graph=world_size >= 8,
         )
 
     # Load weights from weight_loader if specified (for fine-tuning)
@@ -500,7 +519,8 @@ def train_loop(config: _config.TrainConfig):
             f"Running on: {platform.node()} | world_size={torch.distributed.get_world_size() if use_ddp else 1}"
         )
         logging.info(
-            f"Training config: batch_size={config.batch_size}, effective_batch_size={effective_batch_size}, num_train_steps={config.num_train_steps}"
+            f"Training config: batch_size={config.batch_size}, per_gpu_micro_batch={per_gpu_micro}, "
+            f"grad_accum={accum}, num_train_steps={config.num_train_steps}"
         )
         logging.info(f"Memory optimizations: gradient_checkpointing={enable_gradient_checkpointing}")
         logging.info(
@@ -519,110 +539,97 @@ def train_loop(config: _config.TrainConfig):
         else None
     )
 
+    sampler_epoch = 0
+    data_iter = iter(loader)
+
     while global_step < config.num_train_steps:
-        # Set epoch for distributed training
-        if use_ddp and hasattr(loader, "set_epoch"):
-            loader.set_epoch(global_step // len(loader))
+        for pg in optim.param_groups:
+            pg["lr"] = lr_schedule(global_step)
 
-        for observation, actions in loader:
-            # Check if we've reached the target number of steps
-            if global_step >= config.num_train_steps:
-                break
+        optim.zero_grad(set_to_none=True)
+        step_loss_sum = 0.0
 
-            # The unified data loader returns (observation, actions) tuple
-            observation = jax.tree.map(lambda x: x.to(device), observation)  # noqa: PLW2901
-            actions = actions.to(torch.float32)  # noqa: PLW2901
-            actions = actions.to(device)  # noqa: PLW2901
+        for micro in range(accum):
+            try:
+                observation, actions = next(data_iter)
+            except StopIteration:
+                if use_ddp and hasattr(loader, "set_epoch"):
+                    loader.set_epoch(sampler_epoch)
+                    sampler_epoch += 1
+                data_iter = iter(loader)
+                observation, actions = next(data_iter)
 
-            # Update LR
-            for pg in optim.param_groups:
-                pg["lr"] = lr_schedule(global_step)
+            observation = jax.tree.map(lambda x: x.to(device), observation)
+            actions = actions.to(torch.float32).to(device)
 
-            # Forward pass
             losses = model(observation, actions)
-            # Ensure losses is a tensor and handle different return types
             if isinstance(losses, list | tuple):
                 losses = torch.stack(losses)
             elif not isinstance(losses, torch.Tensor):
                 losses = torch.tensor(losses, device=device, dtype=torch.float32)
 
-            loss = losses.mean()
+            loss_mean = losses.mean()
+            (loss_mean / accum).backward()
+            step_loss_sum += float(loss_mean.detach().item())
 
-            # Backward pass
-            loss.backward()
+        loss_log = step_loss_sum / accum
 
-            # Log memory usage after backward pass
-            if global_step < 5 and is_main and torch.cuda.is_available():
-                log_memory_usage(device, global_step, "after_backward")
+        if global_step < 5 and is_main and torch.cuda.is_available():
+            log_memory_usage(device, global_step, "after_backward")
 
-            # Gradient clipping
-            grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=config.optimizer.clip_gradient_norm)
+        grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=config.optimizer.clip_gradient_norm)
+        optim.step()
 
-            # Optimizer step
-            optim.step()
-            optim.zero_grad(set_to_none=True)
+        if is_main:
+            infos.append(
+                {
+                    "loss": loss_log,
+                    "learning_rate": optim.param_groups[0]["lr"],
+                    "grad_norm": float(grad_norm) if isinstance(grad_norm, torch.Tensor) else grad_norm,
+                }
+            )
 
-            # Clear gradients more aggressively
-            for param in model.parameters():
-                if param.grad is not None:
-                    param.grad.detach_()
-                    param.grad = None
+        if is_main and (global_step % config.log_interval == 0):
+            elapsed = time.time() - start_time
 
-            # Collect stats
-            if is_main:
-                infos.append(
-                    {
-                        "loss": loss.item(),
-                        "learning_rate": optim.param_groups[0]["lr"],
-                        "grad_norm": float(grad_norm) if isinstance(grad_norm, torch.Tensor) else grad_norm,
-                    }
-                )
+            avg_loss = sum(info["loss"] for info in infos) / len(infos)
+            avg_lr = sum(info["learning_rate"] for info in infos) / len(infos)
 
-            if is_main and (global_step % config.log_interval == 0):
-                elapsed = time.time() - start_time
+            avg_grad_norm = None
+            if any("grad_norm" in info for info in infos):
+                vals = [
+                    info["grad_norm"] for info in infos if "grad_norm" in info and info["grad_norm"] is not None
+                ]
+                if len(vals) > 0:
+                    avg_grad_norm = sum(vals) / len(vals)
+            logging.info(
+                f"step={global_step} loss={avg_loss:.4f} lr={avg_lr:.2e} grad_norm={avg_grad_norm:.2f} time={elapsed:.1f}s"
+                if avg_grad_norm is not None
+                else f"step={global_step} loss={avg_loss:.4f} lr={avg_lr:.2e} time={elapsed:.1f}s"
+            )
 
-                # Average stats over log interval
-                avg_loss = sum(info["loss"] for info in infos) / len(infos)
-                avg_lr = sum(info["learning_rate"] for info in infos) / len(infos)
+            if config.wandb_enabled and len(infos) > 0:
+                log_payload = {
+                    "loss": avg_loss,
+                    "learning_rate": avg_lr,
+                    "step": global_step,
+                    "time_per_step": elapsed / config.log_interval,
+                }
+                if avg_grad_norm is not None:
+                    log_payload["grad_norm"] = avg_grad_norm
+                wandb.log(log_payload, step=global_step)
 
-                avg_grad_norm = None
-                if any("grad_norm" in info for info in infos):
-                    vals = [
-                        info["grad_norm"] for info in infos if "grad_norm" in info and info["grad_norm"] is not None
-                    ]
-                    if len(vals) > 0:
-                        avg_grad_norm = sum(vals) / len(vals)
-                logging.info(
-                    f"step={global_step} loss={avg_loss:.4f} lr={avg_lr:.2e} grad_norm={avg_grad_norm:.2f} time={elapsed:.1f}s"
-                    if avg_grad_norm is not None
-                    else f"step={global_step} loss={avg_loss:.4f} lr={avg_lr:.2e} time={elapsed:.1f}s"
-                )
+            start_time = time.time()
+            infos = []
 
-                # Log to wandb
-                if config.wandb_enabled and len(infos) > 0:
-                    log_payload = {
-                        "loss": avg_loss,
-                        "learning_rate": avg_lr,
-                        "step": global_step,
-                        "time_per_step": elapsed / config.log_interval,
-                    }
-                    if avg_grad_norm is not None:
-                        log_payload["grad_norm"] = avg_grad_norm
-                    wandb.log(log_payload, step=global_step)
+        global_step += 1
+        save_checkpoint(model, optim, global_step, config, is_main, data_config)
 
-                start_time = time.time()
-                infos = []  # Reset stats collection
-
-            global_step += 1
-            # Save checkpoint using the new mechanism
-            save_checkpoint(model, optim, global_step, config, is_main, data_config)
-
-            # Update progress bar
-            if pbar is not None:
-                pbar.update(1)
-                pbar.set_postfix(
-                    {"loss": f"{loss.item():.4f}", "lr": f"{optim.param_groups[0]['lr']:.2e}", "step": global_step}
-                )
+        if pbar is not None:
+            pbar.update(1)
+            pbar.set_postfix(
+                {"loss": f"{loss_log:.4f}", "lr": f"{optim.param_groups[0]['lr']:.2e}", "step": global_step}
+            )
 
     # Close progress bar
     if pbar is not None:
@@ -637,6 +644,7 @@ def train_loop(config: _config.TrainConfig):
 
 def main():
     init_logging()
+    _cache_env.apply_tgy_disk_caches(log=True)
     config = _config.cli()
     train_loop(config)
 

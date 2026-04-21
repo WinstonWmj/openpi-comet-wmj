@@ -551,6 +551,9 @@ class TrainConfig:
     seed: int = 42
     # Global batch size.
     batch_size: int = 32
+    # PyTorch only: number of forward/backward passes per optimizer step. Loss is scaled by 1/N so the
+    # gradient matches one step with global batch ``batch_size`` (same expectation as JAX with that batch).
+    pytorch_gradient_accumulation_steps: int = 1
     # Number of workers to use for the data loader. Increasing this number will speed up data loading but
     # will increase memory and CPU usage.
     num_workers: int = 2
@@ -784,6 +787,68 @@ _CONFIGS = [
         checkpoint_base_dir="/mnt/project_rlinf_hs/mjwei/download_models/behavior-1k/skill-comet",
         save_interval=1000,
         keep_period=5000,
+        num_workers=8,
+        batch_size=8 * 32,
+    ),
+    TrainConfig(
+        name="pi05-pt50-pretrain-20k_rft_moveto_mix_skills_step_2:8_single_base",
+        exp_name="pi05-pt50-pretrain-20k_rft_moveto_mix_skills_step_2:8_single_base",
+        project_name="B1K",
+        save_interval=300,
+        model=pi0_config.Pi0Config(pi05=True, action_horizon=32),
+        sample_weights=[0.2, 0.8],
+        # PyTorch 训练用 train_pytorch.py；权重从该目录加载 model.safetensors（非 JAX params）
+        pytorch_weight_path="/mnt/project_rlinf_hs/mjwei/download_models/openpi_comet/sunshk/openpi_comet_pytorch/pi05-b1kpt50-cs32",
+        data=[
+            LeRobotB1KDataConfig(
+                repo_id="behavior-1k/2025-challenge-demos",
+                assets=AssetsConfig(
+                    assets_dir="/mnt/project_rlinf_hs/mjwei/download_models/openpi_comet/sunshk/openpi_comet_pytorch/pi05-b1kpt50-cs32/assets",
+                    asset_id="behavior-1k/2025-challenge-demos",
+                ),
+                base_config=DataConfig(
+                    prompt_from_task=True,
+                    behavior_dataset_root="/mnt/project_rlinf_hs/mjwei/download_models/2025-challenge-demos",
+                    tasks=[
+                        "turning_on_radio",
+                        "hanging_pictures",
+                        "attach_a_camera_to_a_tripod",
+                        "clean_a_trumpet",
+                        "cook_cabbage",
+                        "chop_an_onion",
+                        "cook_hot_dogs",
+                        "cook_bacon",
+                    ],
+                    fine_grained_level=2,
+                    skill_list=["move to:1.0"],
+                ),
+            ),
+            LeRobotB1KDataConfig(
+                repo_id="behavior-1k/2025-challenge-demos",
+                assets=AssetsConfig(
+                    assets_dir="/mnt/project_rlinf_hs/mjwei/download_models/openpi_comet/sunshk/openpi_comet_pytorch/pi05-b1kpt50-cs32/assets",
+                    asset_id="behavior-1k/2025-challenge-demos",
+                ),
+                base_config=DataConfig(
+                    prompt_from_task=True,
+                    behavior_dataset_root="/mnt/project_rlinf/tgy/data/rft_move_to/move_to_rollouts33_scan_rollouts33",
+                    tasks=None,
+                    fine_grained_level=2,
+                    skill_list=["move to:1.0"],
+                ),
+            ),
+        ],
+        # PyTorch 入口不读 JAX CheckpointWeightLoader；预训练权重由 pytorch_weight_path 提供
+        weight_loader=weight_loaders.NoOpWeightLoader(),
+        num_train_steps=50_000,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            peak_lr=2e-5,
+            decay_steps=50_000,
+        ),
+        freeze_filter=pi0_config.Pi0Config(pi05=True, action_horizon=32).get_freeze_filter(),
+        ema_decay=None,
+        assets_base_dir="./outputs/assets",
+        checkpoint_base_dir=".",
         num_workers=8,
         batch_size=8 * 32,
     ),
@@ -1373,6 +1438,55 @@ _CONFIGS = [
         keep_period=5000,
         num_workers=8,
         batch_size=8 * 32,
+    ),
+    # PyTorch-only: move skill SFT from safetensors (scripts/train_pytorch.py). JAX weight_loader unused.
+    # accum=2: same nominal batch as JAX (8*32); each forward uses half the samples to fit PyTorch VRAM peaks.
+    TrainConfig(
+        name="pi05_b1k-moveto_pytorch-pt50-cs32",
+        exp_name="openpi",
+        project_name="B1K",
+        model=pi0_config.Pi0Config(pi05=True, action_horizon=32),
+        data=LeRobotB1KDataConfig(
+            repo_id="behavior-1k/2025-challenge-demos/",
+            assets=AssetsConfig(
+                assets_dir="/mnt/project_rlinf_hs/mjwei/download_models/openpi_comet/sunshk/openpi_comet_pytorch/pi05-b1kpt50-cs32/assets",
+            ),
+            base_config=DataConfig(
+                prompt_from_task=True,
+                episodes_index=list(range(200)),
+                behavior_dataset_root="/mnt/project_rlinf_hs/mjwei/download_models/2025-challenge-demos/",
+                fine_grained_level=2,  # 0: global instruction, 1: skill name, 2: subtask description
+                skill_list=["move to:1.0"],
+                tasks=[
+                    "turning_on_radio",
+                    "hanging_pictures",
+                    "attach_a_camera_to_a_tripod",
+                    "clean_a_trumpet",
+                    "cook_cabbage",
+                    "chop_an_onion",
+                    "cook_hot_dogs",
+                    "cook_bacon",
+                ],
+            ),
+        ),
+        weight_loader=weight_loaders.NoOpWeightLoader(),
+        pytorch_weight_path="/mnt/project_rlinf_hs/mjwei/download_models/openpi_comet/sunshk/openpi_comet_pytorch/pi05-b1kpt50-cs32",
+        num_train_steps=50_000,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            peak_lr=2.5e-5,
+            decay_steps=50_000,
+        ),
+        freeze_filter=pi0_config.Pi0Config(pi05=True, action_horizon=32).get_freeze_filter(),
+        ema_decay=None,
+        assets_base_dir="/mnt/project_rlinf_hs/mjwei/download_models/openpi_comet/sunshk/openpi_comet_pytorch/pi05-b1kpt50-cs32/assets",
+        checkpoint_base_dir="/mnt/project_rlinf_hs/mjwei/download_models/behavior-1k/skill-comet",
+        log_interval=100,
+        save_interval=1000,
+        keep_period=5000,
+        num_workers=8,
+        batch_size=8 * 32,
+        # 8×80GB: accum=2 → 16 samples/GPU/forward (~2× activations vs accum=4); nominal batch still 256.
+        pytorch_gradient_accumulation_steps=1,
     ),
     # 4. Multi-dataset Training Configs
     TrainConfig(
